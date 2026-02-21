@@ -787,9 +787,32 @@ class ViaStitchingDialog(viastitching_gui):
         details = self.last_commit_error or "No constructor details captured."
         _debug_log(
             f"No commit backend available in {context}. "
-            "Proceeding with direct board edits.\n"
+            "Operation canceled to avoid unsafe non-undoable edits.\n"
             f"{details}"
         )
+
+    def RequireUndoBackend(self, context, show_popup=True):
+        commit = self.NewBoardCommit()
+        if commit is not None:
+            return commit
+
+        self.LogNoCommitBackend(context)
+        if show_popup:
+            _show_error_with_log(
+                self,
+                _(u"ViaStitching"),
+                _(
+                    u"Proper undo/redo support is unavailable in this legacy action-plugin API on your KiCad build.\n\n"
+                    u"To avoid board corruption/crashes, this operation was canceled.\n\n"
+                    u"Use the KiCad 9 IPC actions instead:\n"
+                    u" - Update Via Array\n"
+                    u" - Remove Via Array\n"
+                    u" - Clean Orphan Vias\n\n"
+                    u"Also ensure: Preferences -> Plugins -> Enable KiCad API"
+                ),
+                context=f"undo_required_{context}"
+            )
+        return None
 
     def CloseDialog(self, modal_code=wx.ID_CANCEL):
         global _active_dialog
@@ -1768,9 +1791,9 @@ class ViaStitchingDialog(viastitching_gui):
 
         _debug_log(f"ClearArea: start include_user_vias={include_user_vias}")
         if commit is None:
-            commit = self.NewBoardCommit()
+            commit = self.RequireUndoBackend("ClearArea", show_popup=show_message)
         if commit is None:
-            self.LogNoCommitBackend("ClearArea")
+            return False
         self.RefreshOwnedViasState()
         self.ClearEditorSelection()
         to_remove = []
@@ -1956,9 +1979,9 @@ class ViaStitchingDialog(viastitching_gui):
             _show_error_with_log(self, _(u"ViaStitching"), _(u"Selected net is not valid on this board."), context="fill_invalid_net")
             return False
         if commit is None:
-            commit = self.NewBoardCommit()
+            commit = self.RequireUndoBackend("FillupArea", show_popup=show_message)
         if commit is None:
-            self.LogNoCommitBackend("FillupArea")
+            return False
         viacount = 0
         candidates = 0
         inside_zone = 0
@@ -2248,9 +2271,9 @@ class ViaStitchingDialog(viastitching_gui):
 
     def RestitchCurrentZone(self, show_message=False, include_user_vias=False, commit=None, push_commit=False):
         if commit is None:
-            commit = self.NewBoardCommit()
+            commit = self.RequireUndoBackend("RestitchCurrentZone", show_popup=show_message)
         if commit is None:
-            self.LogNoCommitBackend("RestitchCurrentZone")
+            return False
         _debug_log(f"RestitchCurrentZone: start include_user_vias={include_user_vias}")
         self.pruned_stale_vias = 0
         self.pruned_stale_vias = self.PruneGroupedViasOutsideZone(commit=commit)
@@ -2295,9 +2318,9 @@ class ViaStitchingDialog(viastitching_gui):
                 created_zone_name = True
                 self.viagroupname = __viagroupname_base__ + zone_name
 
-            commit = self.NewBoardCommit()
+            commit = self.RequireUndoBackend("onProcessAction")
             if commit is None:
-                self.LogNoCommitBackend("onProcessAction")
+                return
 
             self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
             self.ClearEditorSelection()
@@ -2343,9 +2366,9 @@ class ViaStitchingDialog(viastitching_gui):
             if user_vias > 0:
                 include_user_vias = self.PromptRemoveUserNetVias(user_vias)
 
-            commit = self.NewBoardCommit()
+            commit = self.RequireUndoBackend("onClearAction")
             if commit is None:
-                self.LogNoCommitBackend("onClearAction")
+                return
             if self.ClearArea(show_message=False, commit=commit, push_commit=False, include_user_vias=include_user_vias):
                 zone_name = self.area.GetZoneName()
                 if zone_name:
@@ -2401,9 +2424,9 @@ class ViaStitchingDialog(viastitching_gui):
             _debug_log("onCleanOrphansAction: canceled by user")
             return
 
-        commit = self.NewBoardCommit()
+        commit = self.RequireUndoBackend("onCleanOrphansAction")
         if commit is None:
-            self.LogNoCommitBackend("onCleanOrphansAction")
+            return
 
         for via in orphan_vias:
             if commit is not None:
