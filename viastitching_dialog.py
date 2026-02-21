@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime
 
 import wx
@@ -429,6 +430,12 @@ class ViaStitchingDialog(viastitching_gui):
             self.m_chkMaximizeVias.Bind(wx.EVT_CHECKBOX, self.onToggleMaximizeMode)
         if hasattr(self, "m_btnResetPrompts"):
             self.m_btnResetPrompts.Bind(wx.EVT_BUTTON, self.onResetPromptChoices)
+        if hasattr(self, "m_previewPanel"):
+            self.m_previewPanel.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+            self.m_previewPanel.Bind(wx.EVT_PAINT, self.onPreviewPaint)
+            self.m_previewPanel.Bind(wx.EVT_SIZE, self.onPreviewResize)
+            self.m_previewPanel.Bind(wx.EVT_ERASE_BACKGROUND, self.onPreviewEraseBackground)
+        self.BindPreviewInputEvents()
         self.board = _resolve_board(board)
         if self.board is None:
             _show_error_with_log(
@@ -467,6 +474,8 @@ class ViaStitchingDialog(viastitching_gui):
         self._action_in_progress = False
         self._selection_timer_was_running = False
         self._legacy_commit_available = True
+        self._preview_data = None
+        self._preview_refresh_timer = None
 
         if hasattr(self, "m_chkDebugLogging"):
             self.m_chkDebugLogging.SetValue(_is_logging_enabled())
@@ -621,6 +630,7 @@ class ViaStitchingDialog(viastitching_gui):
                 "continuing with direct board edits and native undo handling."
             )
         self.UpdateActionButtons()
+        self.QueuePreviewRefresh()
         self._last_selection_signature = self.SelectionSignature()
 
     def SetTooltips(self):
@@ -674,8 +684,268 @@ class ViaStitchingDialog(viastitching_gui):
             if control is not None:
                 control.Enable(enable_grid_controls)
 
+    def BindPreviewInputEvents(self):
+        text_controls = (
+            self.m_txtViaSize,
+            self.m_txtViaDrillSize,
+            self.m_txtVSpacing,
+            self.m_txtHSpacing,
+            self.m_txtVOffset,
+            self.m_txtHOffset,
+            self.m_txtClearance,
+            self.m_txtPadMargin,
+        )
+        for control in text_controls:
+            if control is not None:
+                control.Bind(wx.EVT_TEXT, self.onPreviewInputChanged)
+
+        checkbox_controls = (
+            self.m_chkRandomize,
+            self.m_chkIncludeOtherLayers,
+            self.m_chkCenterSegments,
+            self.m_chkMaximizeVias,
+        )
+        for control in checkbox_controls:
+            if control is not None:
+                control.Bind(wx.EVT_CHECKBOX, self.onPreviewInputChanged)
+
+    def _parse_inputs_for_preview(self):
+        try:
+            data = {
+                "drillsize": self.FromUserUnit(float(self.m_txtViaDrillSize.GetValue())),
+                "viasize": self.FromUserUnit(float(self.m_txtViaSize.GetValue())),
+                "step_x": self.FromUserUnit(float(self.m_txtHSpacing.GetValue())),
+                "step_y": self.FromUserUnit(float(self.m_txtVSpacing.GetValue())),
+                "offset_x": self.FromUserUnit(float(self.m_txtHOffset.GetValue())),
+                "offset_y": self.FromUserUnit(float(self.m_txtVOffset.GetValue())),
+                "edge_margin": self.FromUserUnit(float(self.m_txtClearance.GetValue())),
+                "pad_margin": self.FromUserUnit(float(self.m_txtPadMargin.GetValue())),
+            }
+        except Exception:
+            return None
+
+        if data["viasize"] <= 0 or data["drillsize"] <= 0 or data["drillsize"] >= data["viasize"]:
+            return None
+        if data["edge_margin"] < 0 or data["pad_margin"] < 0:
+            return None
+        maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+        if (not maximize_vias) and (data["step_x"] <= 0 or data["step_y"] <= 0):
+            return None
+        return data
+
+    def QueuePreviewRefresh(self):
+        if not hasattr(self, "m_previewPanel") or self.m_previewPanel is None:
+            return
+        if self._preview_refresh_timer is not None:
+            try:
+                self._preview_refresh_timer.Stop()
+            except Exception:
+                pass
+        self._preview_refresh_timer = wx.CallLater(120, self.RefreshPreview)
+
+    def RefreshPreview(self):
+        if not hasattr(self, "m_previewPanel") or self.m_previewPanel is None:
+            return
+        try:
+            if self.area is None:
+                self._preview_data = {"status": "Select one valid copper zone to preview via placement."}
+                self.m_previewPanel.Refresh()
+                return
+
+            inputs = self._parse_inputs_for_preview()
+            if inputs is None:
+                self._preview_data = {"status": "Enter valid numeric values to preview placement."}
+                self.m_previewPanel.Refresh()
+                return
+
+            bbox = self.area.GetBoundingBox()
+            left = int(bbox.GetLeft())
+            right = int(bbox.GetRight())
+            top = int(bbox.GetTop())
+            bottom = int(bbox.GetBottom())
+            if right <= left or bottom <= top:
+                self._preview_data = {"status": "Selected zone has invalid bounds."}
+                self.m_previewPanel.Refresh()
+                return
+
+            # Rebuild overlap cache used by CheckOverlap() for current selection/settings.
+            self.GetOverlappingItems()
+
+            maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+            required_edge_margin = (inputs["viasize"] / 2.0) + inputs["edge_margin"]
+            via_clearance = max(1, int(round(inputs["viasize"] + (2 * inputs["pad_margin"]))))
+
+            if maximize_vias:
+                sample_x = max(1, int(round(via_clearance / 2.0)))
+                sample_y = max(1, int(round(via_clearance / 2.0)))
+                x_start_base = left
+                y_start = top
+                staggered = True
+            else:
+                sample_x = max(1, int(inputs["step_x"]))
+                sample_y = max(1, int(inputs["step_y"]))
+                x_start_base = left + ((int(inputs["offset_x"]) - left) % sample_x)
+                y_start = top + ((int(inputs["offset_y"]) - top) % sample_y)
+                staggered = False
+
+            max_preview_candidates = 2600
+            width = max(1, right - left + 1)
+            height = max(1, bottom - top + 1)
+            estimate = ((width // max(1, sample_x)) + 1) * ((height // max(1, sample_y)) + 1)
+            if estimate > max_preview_candidates:
+                scale = math.sqrt(float(estimate) / float(max_preview_candidates))
+                sample_x = max(1, int(math.ceil(sample_x * scale)))
+                sample_y = max(1, int(math.ceil(sample_y * scale)))
+                if not maximize_vias:
+                    x_start_base = left + ((int(inputs["offset_x"]) - left) % sample_x)
+                    y_start = top + ((int(inputs["offset_y"]) - top) % sample_y)
+
+            accepted = []
+            rejected_edge = []
+            rejected_overlap = []
+            counts = {
+                "tested": 0,
+                "inside": 0,
+                "accepted": 0,
+                "rejected_edge": 0,
+                "rejected_overlap": 0,
+            }
+            preview_netcode = self.board.GetNetcodeFromNetname(self.net) if self.net else -1
+            max_points_per_bucket = 1400
+
+            row_index = 0
+            yv = y_start
+            while yv <= bottom:
+                x_start = x_start_base
+                if staggered and (row_index % 2 == 1):
+                    x_start += sample_x / 2.0
+                xv = x_start
+                while xv <= right:
+                    counts["tested"] += 1
+                    p = self.ToBoardPoint(xv, yv)
+                    if not self.IsPointInsideZoneWithMargin(p, required_edge_margin):
+                        counts["rejected_edge"] += 1
+                        if len(rejected_edge) < max_points_per_bucket:
+                            rejected_edge.append((int(round(xv)), int(round(yv))))
+                        xv += sample_x
+                        continue
+
+                    counts["inside"] += 1
+                    probe = pcbnew.PCB_VIA(self.board)
+                    probe.SetPosition(p)
+                    probe.SetNetCode(preview_netcode)
+                    probe.SetDrill(inputs["drillsize"] + 2 * inputs["pad_margin"])
+                    probe.SetWidth(inputs["viasize"] + 2 * inputs["pad_margin"])
+                    if self.CheckOverlap(probe):
+                        counts["rejected_overlap"] += 1
+                        if len(rejected_overlap) < max_points_per_bucket:
+                            rejected_overlap.append((int(round(xv)), int(round(yv))))
+                        xv += sample_x
+                        continue
+
+                    counts["accepted"] += 1
+                    if len(accepted) < max_points_per_bucket:
+                        accepted.append((int(round(xv)), int(round(yv))))
+                    xv += sample_x
+                yv += sample_y
+                row_index += 1
+
+            mode_label = "MAXIMIZE" if maximize_vias else "GRID"
+            self._preview_data = {
+                "bounds": (left, top, right, bottom),
+                "accepted": accepted,
+                "rejected_edge": rejected_edge,
+                "rejected_overlap": rejected_overlap,
+                "counts": counts,
+                "mode": mode_label,
+                "sample": (sample_x, sample_y),
+            }
+            self.m_previewPanel.Refresh()
+        except Exception as e:
+            _debug_log(
+                "RefreshPreview failed: "
+                f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            )
+            self._preview_data = {"status": "Preview failed. Check plugin log for details."}
+            self.m_previewPanel.Refresh()
+
+    def onPreviewEraseBackground(self, event):
+        # Handled in buffered paint.
+        pass
+
+    def onPreviewResize(self, event):
+        self.m_previewPanel.Refresh()
+        event.Skip()
+
+    def onPreviewInputChanged(self, event):
+        self.QueuePreviewRefresh()
+        if event is not None:
+            event.Skip()
+
+    def onPreviewPaint(self, event):
+        if not hasattr(self, "m_previewPanel") or self.m_previewPanel is None:
+            return
+
+        dc = wx.AutoBufferedPaintDC(self.m_previewPanel)
+        w, h = self.m_previewPanel.GetClientSize()
+        dc.SetBackground(wx.Brush(wx.Colour(28, 30, 34)))
+        dc.Clear()
+
+        if w <= 0 or h <= 0:
+            return
+
+        data = self._preview_data
+        if not data:
+            dc.SetTextForeground(wx.Colour(220, 220, 220))
+            dc.DrawText("Preview unavailable.", 8, 8)
+            return
+
+        if "status" in data:
+            dc.SetTextForeground(wx.Colour(220, 220, 220))
+            dc.DrawText(data["status"], 8, 8)
+            return
+
+        left, top, right, bottom = data["bounds"]
+        bw = max(1.0, float(right - left))
+        bh = max(1.0, float(bottom - top))
+        pad = 10.0
+        plot_w = max(10.0, float(w) - (2.0 * pad))
+        plot_h = max(10.0, float(h) - (2.0 * pad))
+        scale = min(plot_w / bw, plot_h / bh)
+        rect_w = bw * scale
+        rect_h = bh * scale
+        ox = pad + (plot_w - rect_w) / 2.0
+        oy = pad + (plot_h - rect_h) / 2.0
+
+        dc.SetPen(wx.Pen(wx.Colour(120, 120, 120), 1))
+        dc.SetBrush(wx.Brush(wx.Colour(36, 38, 44)))
+        dc.DrawRectangle(int(round(ox)), int(round(oy)), int(round(rect_w)), int(round(rect_h)))
+
+        radius = max(1, int(round(min(3.0, max(1.0, scale * 0.22)))))
+
+        def _draw_points(points, color):
+            dc.SetPen(wx.Pen(color, 1))
+            dc.SetBrush(wx.Brush(color))
+            for px, py in points:
+                sx = int(round(ox + (float(px - left) * scale)))
+                sy = int(round(oy + (float(py - top) * scale)))
+                dc.DrawCircle(sx, sy, radius)
+
+        _draw_points(data["rejected_edge"], wx.Colour(208, 76, 76))
+        _draw_points(data["rejected_overlap"], wx.Colour(237, 158, 74))
+        _draw_points(data["accepted"], wx.Colour(74, 198, 120))
+
+        counts = data["counts"]
+        summary = (
+            f"{data['mode']}  tested:{counts['tested']}  "
+            f"ok:{counts['accepted']}  overlap:{counts['rejected_overlap']}  edge:{counts['rejected_edge']}"
+        )
+        dc.SetTextForeground(wx.Colour(235, 235, 235))
+        dc.DrawText(summary, 8, 8)
+
     def onToggleMaximizeMode(self, event):
         self.UpdateMaximizeModeUI()
+        self.QueuePreviewRefresh()
         if event is not None:
             event.Skip()
 
@@ -1158,6 +1428,7 @@ class ViaStitchingDialog(viastitching_gui):
             self.m_btnClear.Enable(False)
             self.m_btnClear.SetToolTip(_(u"Select a filled copper zone with a net to enable removing zone via arrays."))
             self.m_btnOk.SetToolTip(_(u"Select a filled copper zone with a net to enable stitching."))
+        self.QueuePreviewRefresh()
 
         if hasattr(self, "m_btnCleanOrphans"):
             if refresh_orphan_scan:

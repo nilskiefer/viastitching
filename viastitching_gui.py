@@ -160,7 +160,7 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_chkCenterSegments.SetValue(True)
 		bLeftOptions.Add( self.m_chkCenterSegments, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
-		self.m_chkIncludeOtherLayers = wx.CheckBox( self, wx.ID_ANY, _(u"Check overlaps on all copper layers"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkIncludeOtherLayers = wx.CheckBox( self, wx.ID_ANY, _(u"Check overlaps on all copper layers (safer, slower)"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_chkIncludeOtherLayers.SetValue(True)
 		bLeftOptions.Add( self.m_chkIncludeOtherLayers, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
@@ -178,7 +178,24 @@ class viastitching_gui ( wx.Dialog ):
 		bLeftOptions.Add( self.m_btnResetPrompts, 0, wx.ALIGN_LEFT|wx.BOTTOM, 2 )
 
 		bOptionsRow.Add( bLeftOptions, 0, wx.ALL|wx.EXPAND, 5 )
-		bOptionsRow.Add( ( 0, 0), 1, wx.EXPAND, 5 )
+
+		bRightPreview = wx.BoxSizer( wx.VERTICAL )
+
+		self.m_lblPreview = wx.StaticText( self, wx.ID_ANY, _(u"Placement Preview"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblPreview.Wrap( -1 )
+
+		bRightPreview.Add( self.m_lblPreview, 0, wx.ALL, 2 )
+
+		self.m_previewPanel = wx.Panel( self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SIMPLE|wx.TAB_TRAVERSAL )
+		self.m_previewPanel.SetMinSize( wx.Size( 420,260 ) )
+		bRightPreview.Add( self.m_previewPanel, 1, wx.EXPAND|wx.ALL, 2 )
+
+		self.m_lblPreviewLegend = wx.StaticText( self, wx.ID_ANY, _(u"Green: accepted  Orange: overlap reject  Red: edge reject"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblPreviewLegend.Wrap( -1 )
+
+		bRightPreview.Add( self.m_lblPreviewLegend, 0, wx.ALL, 2 )
+
+		bOptionsRow.Add( bRightPreview, 1, wx.EXPAND|wx.LEFT, 8 )
 
 		bMainSizer.Add( bOptionsRow, 0, wx.EXPAND, 5 )
 
