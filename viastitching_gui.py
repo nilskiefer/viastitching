@@ -157,6 +157,14 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_chkIncludeOtherLayers.SetValue(True)
 		bHSizer4.Add( self.m_chkIncludeOtherLayers, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
 
+		self.m_chkCenterSegments = wx.CheckBox( self, wx.ID_ANY, _(u"Center local segments"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkCenterSegments.SetValue(True)
+		bHSizer4.Add( self.m_chkCenterSegments, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
+		self.m_chkMaximizeVias = wx.CheckBox( self, wx.ID_ANY, _(u"Try to maximize vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkMaximizeVias.SetValue(False)
+		bHSizer4.Add( self.m_chkMaximizeVias, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
 		self.m_chkDebugLogging = wx.CheckBox( self, wx.ID_ANY, _(u"Enable logging"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_chkDebugLogging.SetValue(True)
 		bHSizer4.Add( self.m_chkDebugLogging, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )

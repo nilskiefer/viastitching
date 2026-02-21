@@ -558,6 +558,10 @@ class ViaStitchingDialog(viastitching_gui):
         self.m_chkClearOwn.Hide()
         self.Layout()
         self.m_chkIncludeOtherLayers.SetValue(defaults.get("IncludeOtherLayers", True))
+        if hasattr(self, "m_chkCenterSegments"):
+            self.m_chkCenterSegments.SetValue(defaults.get("CenterSegments", True))
+        if hasattr(self, "m_chkMaximizeVias"):
+            self.m_chkMaximizeVias.SetValue(defaults.get("MaximizeVias", False))
         self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
 
         # Get default Vias dimensions
@@ -618,6 +622,8 @@ class ViaStitchingDialog(viastitching_gui):
             (self.m_chkClearOwn, _(u"Internal compatibility option.")),
             (self.m_chkRandomize, _(u"Apply small random jitter to each grid point.")),
             (self.m_chkIncludeOtherLayers, _(u"If enabled, reject vias that collide with copper objects on any copper layer. Disable to only check the selected zone layer.")),
+            (self.m_chkCenterSegments, _(u"If enabled, each reachable segment in a discontinuous row is centered for a neater pattern.")),
+            (self.m_chkMaximizeVias, _(u"Try multiple grid phases and segment packing to place as many vias as possible while respecting margins.")),
             (self.m_chkDebugLogging, _(u"Write detailed runtime logs to viastitching_debug.log in the plugin folder.")),
             (self.m_btnOk, _(u"Apply stitching with current parameters.")),
             (self.m_btnClear, _(u"Remove plugin-owned vias. If matching user vias are found on this zone net, you can choose to remove them too.")),
@@ -1411,6 +1417,8 @@ class ViaStitchingDialog(viastitching_gui):
             "Randomize": self.m_chkRandomize.GetValue(),
             "ClearOwn": self.m_chkClearOwn.GetValue(),
             "IncludeOtherLayers": self.m_chkIncludeOtherLayers.GetValue(),
+            "CenterSegments": self.m_chkCenterSegments.GetValue() if hasattr(self, "m_chkCenterSegments") else True,
+            "MaximizeVias": self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False,
             "ZoneSignature": _zone_signature(self.area),
             "OwnedVias": sorted(self.owned_via_ids),
         }
@@ -1896,35 +1904,106 @@ class ViaStitchingDialog(viastitching_gui):
         rejected_overlap = 0
         rejected_edge_margin = 0
 
-        x = left + ((offset_x - left) % step_x)
+        center_segments = self.m_chkCenterSegments.GetValue() if hasattr(self, "m_chkCenterSegments") else True
+        maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+        randomize_points = self.randomize and not maximize_vias
+        required_edge_margin = (viasize / 2) + edge_margin
+        probe_step = max(1, int(step_x / 10))
 
-        # Cycle trough area bounding box checking and implanting vias
-        layer_set = self.area.GetLayerSet()
-        hit_test_layers = self.GetZoneHitTestLayers(self.area)
-        if not hit_test_layers:
-            _show_error_with_log(
-                self,
-                _(u"ViaStitching"),
-                _(u"Unable to detect selected zone copper layers."),
-                context="fill_no_zone_layers"
-            )
-            return False
+        def _phase_offsets(step, base, samples):
+            if step <= 0:
+                return [0]
+            offsets = {int(base % step)}
+            if samples > 1:
+                for i in range(samples):
+                    offsets.add(int((i * step) // samples))
+            return sorted(offsets)
 
-        while x <= right:
-            y = top + ((offset_y - top) % step_y)
-            while y <= bottom:
-                candidates += 1
-                if self.randomize:
-                    xp = x + random.uniform(-1, 1) * step_x / 5
-                    yp = y + random.uniform(-1, 1) * step_y / 5
+        def _inside_margin_xy(xp, yp):
+            return self.IsPointInsideZoneWithMargin(self.ToBoardPoint(xp, yp), required_edge_margin)
+
+        def _row_inside_intervals(yp):
+            intervals = []
+            run_start = None
+            xprobe = left
+            while xprobe <= right:
+                inside = _inside_margin_xy(xprobe, yp)
+                if inside:
+                    if run_start is None:
+                        run_start = xprobe
+                elif run_start is not None:
+                    intervals.append((run_start, xprobe - probe_step))
+                    run_start = None
+                xprobe += probe_step
+            if run_start is not None:
+                intervals.append((run_start, right))
+            return intervals
+
+        def _grid_count_in_interval(start_x, a, b):
+            if b < a:
+                return 0
+            k0 = int(math.ceil((a - start_x) / float(step_x)))
+            k1 = int(math.floor((b - start_x) / float(step_x)))
+            return max(0, k1 - k0 + 1)
+
+        def _build_row_positions(yp, phase_x):
+            start_x = left + ((phase_x - left) % step_x)
+            if not center_segments and not maximize_vias:
+                row = []
+                xv = start_x
+                while xv <= right:
+                    row.append(int(xv))
+                    xv += step_x
+                return row
+
+            row = []
+            for a, b in _row_inside_intervals(yp):
+                if b < a:
+                    continue
+                if maximize_vias:
+                    n = int(math.floor((b - a) / float(step_x))) + 1
                 else:
-                    xp = x
-                    yp = y
+                    n = _grid_count_in_interval(start_x, a, b)
+                if n <= 0:
+                    continue
 
-                p = self.ToBoardPoint(xp, yp)
+                if center_segments:
+                    span = b - a
+                    first = a + 0.5 * (span - (n - 1) * step_x)
+                    for i in range(n):
+                        row.append(int(round(first + i * step_x)))
+                else:
+                    k0 = int(math.ceil((a - start_x) / float(step_x)))
+                    xv = start_x + k0 * step_x
+                    while xv <= b:
+                        row.append(int(xv))
+                        xv += step_x
+            return sorted({x for x in row if left <= x <= right})
 
-                if self.IsInsideSelectedZone(p):
-                    inside_zone += 1
+        def _run_phase(phase_x, phase_y, apply_changes=False):
+            phase_viacount = 0
+            phase_candidates = 0
+            phase_inside = 0
+            phase_rejected_overlap = 0
+            phase_rejected_edge = 0
+
+            yv = top + ((phase_y - top) % step_y)
+            while yv <= bottom:
+                for xv in _build_row_positions(yv, phase_x):
+                    phase_candidates += 1
+                    if randomize_points:
+                        xp = xv + random.uniform(-1, 1) * step_x / 5
+                        yp = yv + random.uniform(-1, 1) * step_y / 5
+                    else:
+                        xp = xv
+                        yp = yv
+
+                    p = self.ToBoardPoint(xp, yp)
+                    if not self.IsPointInsideZoneWithMargin(p, required_edge_margin):
+                        phase_rejected_edge += 1
+                        continue
+
+                    phase_inside += 1
                     via = pcbnew.PCB_VIA(self.board)
                     via.SetPosition(p)
                     if hasattr(via, "SetViaType") and hasattr(pcbnew, "VIATYPE_THROUGH"):
@@ -1937,21 +2016,15 @@ class ViaStitchingDialog(viastitching_gui):
                     elif hasattr(via, "SetLayerSet"):
                         via.SetLayerSet(layer_set)
                     via.SetNetCode(netcode)
-                    # Inflate candidate for overlap checks by pad margin.
                     via.SetDrill(drillsize + 2 * pad_margin)
                     via.SetWidth(viasize + 2 * pad_margin)
-                    # via.SetTimeStamp(__timecode__)
+
                     if self.CheckOverlap(via):
-                        rejected_overlap += 1
-                        y += step_y
+                        phase_rejected_overlap += 1
                         continue
 
-                    # Always enforce that the via body stays within the zone.
-                    # Edge margin is treated as extra margin on top of via radius.
-                    required_edge_margin = (viasize / 2) + edge_margin
-                    if not self.CheckClearance(via, self.area, required_edge_margin):
-                        rejected_edge_margin += 1
-                        y += step_y
+                    if not apply_changes:
+                        phase_viacount += 1
                         continue
 
                     if self.pcb_group is None and commit is not None:
@@ -1967,9 +2040,58 @@ class ViaStitchingDialog(viastitching_gui):
                     via_uuid = _item_uuid(via)
                     if via_uuid:
                         self.owned_via_ids.add(via_uuid)
-                    viacount += 1
-                y += step_y
-            x += step_x
+                    phase_viacount += 1
+                yv += step_y
+
+            return {
+                "inserted": phase_viacount,
+                "candidates": phase_candidates,
+                "inside_zone": phase_inside,
+                "rejected_overlap": phase_rejected_overlap,
+                "rejected_edge_margin": phase_rejected_edge,
+            }
+
+        # Cycle trough area bounding box checking and implanting vias
+        layer_set = self.area.GetLayerSet()
+        hit_test_layers = self.GetZoneHitTestLayers(self.area)
+        if not hit_test_layers:
+            _show_error_with_log(
+                self,
+                _(u"ViaStitching"),
+                _(u"Unable to detect selected zone copper layers."),
+                context="fill_no_zone_layers"
+            )
+            return False
+
+        best_phase_x = offset_x
+        best_phase_y = offset_y
+        if maximize_vias:
+            x_phases = _phase_offsets(step_x, offset_x, 6 if not center_segments else 1)
+            y_phases = _phase_offsets(step_y, offset_y, 8)
+            best_score = None
+            for phase_y in y_phases:
+                for phase_x in x_phases:
+                    trial = _run_phase(phase_x, phase_y, apply_changes=False)
+                    score = (
+                        trial["inserted"],
+                        -(trial["rejected_overlap"] + trial["rejected_edge_margin"]),
+                        -trial["rejected_edge_margin"],
+                    )
+                    if best_score is None or score > best_score:
+                        best_score = score
+                        best_phase_x = phase_x
+                        best_phase_y = phase_y
+            _debug_log(
+                f"FillupArea maximize search: best_phase=({best_phase_x},{best_phase_y}) "
+                f"score={best_score}"
+            )
+
+        applied = _run_phase(best_phase_x, best_phase_y, apply_changes=True)
+        viacount = applied["inserted"]
+        candidates = applied["candidates"]
+        inside_zone = applied["inside_zone"]
+        rejected_overlap = applied["rejected_overlap"]
+        rejected_edge_margin = applied["rejected_edge_margin"]
 
         self.last_fill_stats = {
             "inserted": viacount,

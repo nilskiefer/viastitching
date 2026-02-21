@@ -45,6 +45,8 @@ The plugin dialog lets you specify via size/drill plus two separate margin contr
 You can also customize vertical/horizontal spacing and offsets.
 All controls now include tooltips explaining what they do.
 The plugin now also includes a toggle (`Check overlaps on all copper layers`) so you can decide whether overlap checks are global (all copper layers) or limited to the selected zone layer.
+`Center local segments` keeps each discontinuous row fragment visually centered.
+`Try to maximize vias` runs a phase search to maximize via count while respecting margins.
 The most recent settings are remembered and restored when reopening the dialog, including via size/drill, spacing, offsets, edge margin, pad margin, randomize, clear mode, and the overlap-scope toggle.
 For safety, plugin-managed vias are tracked per zone by UUID in the PCB file. Remove/update operations only touch vias in that ownership list, so user-placed vias are not modified even if they look identical or are copied from plugin-created geometry.
 The `Remove Via Array` button removes only plugin-owned vias and keeps the selected zone/pour.
