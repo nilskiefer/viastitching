@@ -156,6 +156,27 @@ def _is_board_obj(board):
     return hasattr(board, "GetTracks") and hasattr(board, "GetNetsByName")
 
 
+def _board_api_usable(board):
+    if not _is_board_obj(board):
+        return False
+
+    probes = (
+        ("GetTracks", lambda b: b.GetTracks()),
+        ("GetNetsByName", lambda b: b.GetNetsByName()),
+    )
+
+    for name, fn in probes:
+        try:
+            fn(board)
+        except Exception as exc:
+            _debug_log(
+                f"Board probe failed: method={name} board={_safe_obj_desc(board)} "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            return False
+    return True
+
+
 def _resolve_board(board):
     candidates = [board]
     try:
@@ -164,7 +185,7 @@ def _resolve_board(board):
         pass
 
     for candidate in candidates:
-        if _is_board_obj(candidate):
+        if _board_api_usable(candidate):
             _debug_log(f"Resolved board object: {_safe_obj_desc(candidate)}")
             return candidate
 
@@ -174,7 +195,7 @@ def _resolve_board(board):
                 continue
             try:
                 cast_board = pcbnew.BOARD(candidate)
-                if _is_board_obj(cast_board):
+                if _board_api_usable(cast_board):
                     _debug_log(f"Resolved board via cast: {_safe_obj_desc(cast_board)}")
                     return cast_board
             except Exception:
@@ -441,7 +462,24 @@ class ViaStitchingDialog(viastitching_gui):
 
         self.getConfigLayer()
 
-        drawings = self.board.GetDrawings() if hasattr(self.board, "GetDrawings") else []
+        drawings = []
+        if hasattr(self.board, "GetDrawings"):
+            try:
+                drawings = self.board.GetDrawings()
+            except Exception as exc:
+                _debug_log(
+                    "GetDrawings failed during init: "
+                    f"board={_safe_obj_desc(self.board)} "
+                    f"error={type(exc).__name__}: {exc}"
+                )
+                _show_error_with_log(
+                    self,
+                    _(u"ViaStitching"),
+                    _(u"Unable to read board drawings from the current KiCad board object."),
+                    context="init_get_drawings",
+                )
+                self.Destroy()
+                return
         for d in drawings:
             layer_name = self.GetLayerName(d)
             if layer_name == 'Edge.Cuts':
