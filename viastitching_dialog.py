@@ -464,6 +464,7 @@ class ViaStitchingDialog(viastitching_gui):
         self.parent_window = parent
         self._action_in_progress = False
         self._selection_timer_was_running = False
+        self._legacy_commit_available = True
 
         if hasattr(self, "m_chkDebugLogging"):
             self.m_chkDebugLogging.SetValue(_is_logging_enabled())
@@ -610,6 +611,25 @@ class ViaStitchingDialog(viastitching_gui):
         self.m_cbNet.Enable(False)
         self.overlappings = None
         self.SetTooltips()
+        self._legacy_commit_available = (self.NewBoardCommit() is not None)
+        if not self._legacy_commit_available:
+            if hasattr(self, "m_btnOk"):
+                self.m_btnOk.Enable(False)
+                self.m_btnOk.SetToolTip(_(u"Use KiCad 9 IPC action: Update Via Array"))
+            if hasattr(self, "m_btnClear"):
+                self.m_btnClear.Enable(False)
+                self.m_btnClear.SetToolTip(_(u"Use KiCad 9 IPC action: Remove Via Array"))
+            if hasattr(self, "m_btnCleanOrphans"):
+                self.m_btnCleanOrphans.Enable(False)
+                self.m_btnCleanOrphans.SetToolTip(_(u"Use KiCad 9 IPC action: Clean Orphan Vias"))
+            _show_info(
+                self,
+                _(u"ViaStitching"),
+                _(
+                    u"Legacy action-plugin edits are disabled on this KiCad build because undo transactions are unavailable.\n\n"
+                    u"Use the KiCad 9 IPC actions for reliable undo/redo."
+                )
+            )
         self.UpdateActionButtons()
 
         self.Bind(wx.EVT_TIMER, self.onSelectionPoll, self.selection_timer)
@@ -1050,6 +1070,13 @@ class ViaStitchingDialog(viastitching_gui):
         self.config_textbox.SetText(json.dumps(self.config, indent=2))
 
     def UpdateActionButtons(self, refresh_orphan_scan=True):
+        if not getattr(self, "_legacy_commit_available", True):
+            self.m_btnOk.Enable(False)
+            self.m_btnClear.Enable(False)
+            if hasattr(self, "m_btnCleanOrphans"):
+                self.m_btnCleanOrphans.Enable(False)
+            return
+
         selection_ok = self.IsSelectionValid()
         self.m_btnOk.Enable(selection_ok)
 
