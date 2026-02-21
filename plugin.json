@@ -25,6 +25,22 @@
       ]
     },
     {
+      "identifier": "update_via_array_maximize",
+      "name": "Update Via Array (Maximize)",
+      "description": "Maximize via count while maintaining margins and overlap checks.",
+      "entrypoint": "ipc/update_via_array_maximize.py",
+      "show-button": false,
+      "scopes": [
+        "pcb"
+      ],
+      "icons-light": [
+        "viastitching.png"
+      ],
+      "icons-dark": [
+        "viastitching.png"
+      ]
+    },
+    {
       "identifier": "remove_via_array",
       "name": "Remove Via Array",
       "description": "Remove only plugin-owned vias from the currently selected zone.",
