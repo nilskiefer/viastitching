@@ -1,6 +1,6 @@
 # ViaStitching
 
-Via Stitching action-plugin for use with KiCAD 6.0+.
+Via Stitching action-plugin for use with KiCAD 6.0+ (updated for KiCad 9 compatibility).
 
 Fill a selected copper area with a pattern of vias.
 
@@ -17,12 +17,20 @@ C:\Users\<user_folder>\Documents\KiCad\7.0\scripting\plugins\viastitching
 
 ## How it works
 
-The workflow is pretty simple: select the area you want to fill, click on ```Tools->External Plugins->ViaStitching``` or click on ![AddNet icon](viastitching.png?raw=true) toolbar icon: a dilaog like the one below should appear:
+The workflow is pretty simple: select the area you want to fill (or select an existing stitching group), click on ```Tools->External Plugins->ViaStitching``` or click on ![AddNet icon](viastitching.png?raw=true) toolbar icon: a dilaog like the one below should appear:
 
 ![ViaStitching dialog](pictures/viastitching_dialog.png?raw=true "ViaStitching dialog")
 
-The vias you're going to create needs to be assigned a net usually this's the net of the target area for this reason the plugin pre-select this net for you; of course you're free to select another net if you like.
-The plugin dialog let you also specify the parameters for the via creation (via size and drill size), such values are taken from board configuration, you can change them but beware to use values that will not conflict with DRC rules; you can customize also: vertical and horizontal spacing between vias and edge clearance (insert 0 will disable check).
+The net is now derived from the selected zone and is read-only in the dialog.
+The plugin dialog lets you specify via size/drill plus two separate margin controls:
+- Edge margin: extra distance from via edge to zone boundary.
+- Pad margin: extra spacing used by overlap checks against tracks/pads/vias/zones.
+You can also customize vertical/horizontal spacing and offsets.
+All controls now include tooltips explaining what they do.
+The plugin now also includes a toggle (`Check overlaps on all copper layers`) so you can decide whether overlap checks are global (all copper layers) or limited to the selected zone layer.
+The most recent settings are remembered and restored when reopening the dialog, including via size/drill, spacing, offsets, edge margin, pad margin, randomize, clear mode, and the overlap-scope toggle.
+For safety, plugin-managed vias are tracked per zone by UUID in the PCB file. Remove/update operations only touch vias in that ownership list, so user-placed vias are not modified even if they look identical or are copied from plugin-created geometry.
+The `Remove Via Array` button removes only plugin-owned vias and keeps the selected zone/pour.
 When you're satisfied with your settings you have just to press __Ok__ and the fillup will begin (I'm assuming __Fill__ action is checked).
 If everything goes fine you'll get something like this:
 

@@ -35,7 +35,8 @@ class viastitching_gui ( wx.Dialog ):
 
 		m_cbNetChoices = []
 		self.m_cbNet = wx.ComboBox( self, wx.ID_ANY, wx.EmptyString, wx.DefaultPosition, wx.DefaultSize, m_cbNetChoices, wx.CB_DROPDOWN|wx.CB_READONLY|wx.CB_SORT )
-		bHSizer1.Add( self.m_cbNet, 0, wx.ALL, 5 )
+		self.m_cbNet.SetMinSize( wx.Size( 360,-1 ) )
+		bHSizer1.Add( self.m_cbNet, 1, wx.ALL|wx.EXPAND, 5 )
 
 
 		bMainSizer.Add( bHSizer1, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL|wx.EXPAND, 5 )
@@ -101,17 +102,17 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_txtHOffset.SetMinSize( wx.Size( 120,-1 ) )		
 		bHSizer6.Add( self.m_txtHOffset, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
 
-		self.m_lblUnit2 = wx.StaticText( self, wx.ID_ANY, _(u"mm"), wx.DefaultPosition, wx.DefaultSize, 0 )
-		self.m_lblUnit2.Wrap( -1 )
+		self.m_lblUnit3 = wx.StaticText( self, wx.ID_ANY, _(u"mm"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblUnit3.Wrap( -1 )
 
-		bHSizer6.Add( self.m_lblUnit2, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+		bHSizer6.Add( self.m_lblUnit3, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
 
 
 		bMainSizer.Add( bHSizer6, 1, wx.EXPAND, 5 )
 
 		bSizer7 = wx.BoxSizer( wx.HORIZONTAL )
 
-		self.m_staticText6 = wx.StaticText( self, wx.ID_ANY, _(u"Clearance"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_staticText6 = wx.StaticText( self, wx.ID_ANY, _(u"Edge margin"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_staticText6.Wrap( -1 )
 
 		bSizer7.Add( self.m_staticText6, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
@@ -120,8 +121,28 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_txtClearance.SetMinSize( wx.Size( 120,-1 ) )		
 		bSizer7.Add( self.m_txtClearance, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
 
+		self.m_lblUnit4 = wx.StaticText( self, wx.ID_ANY, _(u"mm"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblUnit4.Wrap( -1 )
+		bSizer7.Add( self.m_lblUnit4, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
 
 		bMainSizer.Add( bSizer7, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL|wx.EXPAND, 5 )
+
+		bSizer8 = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.m_staticTextPadMargin = wx.StaticText( self, wx.ID_ANY, _(u"Pad margin"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_staticTextPadMargin.Wrap( -1 )
+		bSizer8.Add( self.m_staticTextPadMargin, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
+		self.m_txtPadMargin = wx.TextCtrl( self, wx.ID_ANY, _(u"0"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_txtPadMargin.SetMinSize( wx.Size( 120,-1 ) )
+		bSizer8.Add( self.m_txtPadMargin, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
+		self.m_lblUnit5 = wx.StaticText( self, wx.ID_ANY, _(u"mm"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblUnit5.Wrap( -1 )
+		bSizer8.Add( self.m_lblUnit5, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
+		bMainSizer.Add( bSizer8, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL|wx.EXPAND, 5 )
 
 		bHSizer4 = wx.BoxSizer( wx.HORIZONTAL )
 
@@ -132,21 +153,35 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_chkRandomize = wx.CheckBox( self, wx.ID_ANY, _(u"Randomize"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		bHSizer4.Add( self.m_chkRandomize, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
 
+		self.m_chkIncludeOtherLayers = wx.CheckBox( self, wx.ID_ANY, _(u"Check overlaps on all copper layers"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkIncludeOtherLayers.SetValue(True)
+		bHSizer4.Add( self.m_chkIncludeOtherLayers, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
+		self.m_chkDebugLogging = wx.CheckBox( self, wx.ID_ANY, _(u"Enable logging"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkDebugLogging.SetValue(True)
+		bHSizer4.Add( self.m_chkDebugLogging, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
 
 		bMainSizer.Add( bHSizer4, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL, 5 )
 
 		bHSizer5 = wx.BoxSizer( wx.HORIZONTAL )
 
+		self.m_btnCancel = wx.Button( self, wx.ID_ANY, _(u"&Cancel"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		bHSizer5.Add( self.m_btnCancel, 0, wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
+		self.m_btnResetPrompts = wx.Button( self, wx.ID_ANY, _(u"Reset Prompt &Choices"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		bHSizer5.Add( self.m_btnResetPrompts, 0, wx.ALL, 5 )
+
+		self.m_btnClear = wx.Button( self, wx.ID_ANY, _(u"Remove &Via Array"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		bHSizer5.Add( self.m_btnClear, 0, wx.ALL, 5 )
+
+		self.m_btnCleanOrphans = wx.Button( self, wx.ID_ANY, _(u"Clean &Orphan Vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		bHSizer5.Add( self.m_btnCleanOrphans, 0, wx.ALL, 5 )
+
 		self.m_btnOk = wx.Button( self, wx.ID_ANY, _(u"&Ok"), wx.DefaultPosition, wx.DefaultSize, 0 )
 
 		self.m_btnOk.SetDefault()
 		bHSizer5.Add( self.m_btnOk, 0, wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
-
-		self.m_btnCancel = wx.Button( self, wx.ID_ANY, _(u"&Cancel"), wx.DefaultPosition, wx.DefaultSize, 0 )
-		bHSizer5.Add( self.m_btnCancel, 0, wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
-
-		self.m_btnClear = wx.Button( self, wx.ID_ANY, _(u"C&lear"), wx.DefaultPosition, wx.DefaultSize, 0 )
-		bHSizer5.Add( self.m_btnClear, 0, wx.ALL, 5 )
 
 
 		bMainSizer.Add( bHSizer5, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL, 5 )
@@ -160,5 +195,3 @@ class viastitching_gui ( wx.Dialog ):
 
 	def __del__( self ):
 		pass
-
-

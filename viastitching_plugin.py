@@ -24,4 +24,4 @@ class ViaStitchingPlugin(ActionPlugin):
         self.icon_file_name = os.path.join(os.path.dirname(__file__), 'viastitching.png')
 
     def Run(self):
-        InitViaStitchingDialog(pcbnew.GetBoard())
+        InitViaStitchingDialog(None)
