@@ -1,0 +1,47 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "org.nilskiefer.viastitching",
+  "name": "ViaStitching",
+  "description": "Zone-scoped via stitching array tools for KiCad PCB editor.",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.10"
+  },
+  "actions": [
+    {
+      "identifier": "update_via_array",
+      "name": "Update Via Array",
+      "description": "Create or update a plugin-owned via array in the currently selected zone.",
+      "entrypoint": "ipc/viastitching_ipc.py",
+      "show-button": true,
+      "scopes": [
+        "pcb"
+      ],
+      "icons-light": [
+        "viastitching.png"
+      ],
+      "icons-dark": [
+        "viastitching.png"
+      ]
+    },
+    {
+      "identifier": "remove_via_array",
+      "name": "Remove Via Array",
+      "description": "Remove only plugin-owned vias from the currently selected zone.",
+      "entrypoint": "ipc/viastitching_ipc.py",
+      "args": [
+        "remove"
+      ],
+      "show-button": false,
+      "scopes": [
+        "pcb"
+      ],
+      "icons-light": [
+        "viastitching.png"
+      ],
+      "icons-dark": [
+        "viastitching.png"
+      ]
+    }
+  ]
+}

@@ -15,6 +15,17 @@ To install it as user plugin on Windows systems (KiCAD 7.0) you should put plugi
 
 C:\Users\<user_folder>\Documents\KiCad\7.0\scripting\plugins\viastitching
 
+## KiCad 9 IPC mode (undo/redo-safe backend)
+
+This repo now includes an IPC plugin manifest (`plugin.json`) and IPC action entrypoint (`ipc/viastitching_ipc.py`).
+
+For KiCad 9:
+1. Enable `Preferences -> Plugins -> Enable KiCad API`.
+2. Make sure the plugin environment installs `requirements.txt`.
+3. Use the IPC action `Update Via Array` for transactional edits.
+
+The IPC action groups add/remove work into one commit using KiCad `begin_commit/push_commit`, so one Undo should revert the whole array operation.
+
 ## How it works
 
 The workflow is pretty simple: select the area you want to fill (or select an existing stitching group), click on ```Tools->External Plugins->ViaStitching``` or click on ![AddNet icon](viastitching.png?raw=true) toolbar icon: a dilaog like the one below should appear:
