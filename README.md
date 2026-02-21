@@ -32,7 +32,7 @@ The ActionPlugin entrypoint (`Tools -> External Plugins -> ViaStitching`) is als
 
 The IPC backend (`ipc/viastitching_ipc.py`) groups each operation into a single KiCad board commit (`begin_commit/push_commit`), so Undo/Redo is coherent for create/remove/update actions.
 Plugin ownership/settings are stored in PCB-embedded metadata (not only local plugin files), so reverting PCB commits also reverts array ownership state.
-The IPC placement engine centers via rows inside local discontinuous zone segments for neater arrays; a dedicated `Update Via Array (Maximize)` action runs multi-phase search to pack more vias while respecting edge/pad margins.
+`Update Via Array (Maximize)` now uses dense non-grid candidate packing to maximize via count while respecting overlap checks and edge/pad margins.
 
 ## How it works (KiCad 9 IPC)
 
@@ -43,10 +43,12 @@ The IPC placement engine centers via rows inside local discontinuous zone segmen
 
 Notes:
 - The zone net is always derived from the selected zone and is read-only.
+- In maximize mode, spacing/offset fields are ignored (and disabled in the ActionPlugin dialog). Placement is driven by via geometry plus edge/pad margins.
 - If no filled copper is available, the plugin asks whether to rebuild zone copper.
 - If user-placed vias exist on the selected zone net inside the zone, the plugin asks whether to replace them.
 - `Remove Via Array` removes plugin-owned vias for the selected zone; if user vias are detected in the same zone/net, it asks whether to remove those too.
 - `Clean Orphan Vias` removes plugin-owned vias that no longer belong inside their owning zones.
+- In the ActionPlugin dialog, options (including `Reset Prompt Choices` and `Clean Orphan Vias`) are in the left-side options panel; bottom-row actions are `Cancel`, `Remove Via Array`, and `OK`.
 
 Ownership and settings are persisted in PCB metadata, so commit/revert in git keeps via-array state coherent with the board revision.
 

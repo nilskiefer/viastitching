@@ -180,7 +180,7 @@ class viastitching_gui ( wx.Dialog ):
 		bOptionsRow.Add( bLeftOptions, 0, wx.ALL|wx.EXPAND, 5 )
 		bOptionsRow.Add( ( 0, 0), 1, wx.EXPAND, 5 )
 
-		bMainSizer.Add( bOptionsRow, 1, wx.EXPAND, 5 )
+		bMainSizer.Add( bOptionsRow, 0, wx.EXPAND, 5 )
 
 		bHSizer5 = wx.BoxSizer( wx.HORIZONTAL )
 
