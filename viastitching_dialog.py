@@ -9,6 +9,7 @@ from json import JSONDecodeError
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 import wx
@@ -177,30 +178,43 @@ def _board_api_usable(board):
     return True
 
 
-def _resolve_board(board):
-    candidates = [board]
-    try:
-        candidates.append(pcbnew.GetBoard())
-    except Exception:
-        pass
+def _resolve_board(board, retries=8, retry_delay_s=0.08):
+    for attempt in range(max(1, int(retries))):
+        candidates = []
+        if board is not None:
+            candidates.append(board)
+        try:
+            active = pcbnew.GetBoard()
+            if active is not None:
+                candidates.append(active)
+        except Exception:
+            pass
 
-    for candidate in candidates:
-        if _board_api_usable(candidate):
-            _debug_log(f"Resolved board object: {_safe_obj_desc(candidate)}")
-            return candidate
-
-    if hasattr(pcbnew, "BOARD"):
         for candidate in candidates:
-            if candidate is None:
-                continue
-            try:
-                cast_board = pcbnew.BOARD(candidate)
+            if _board_api_usable(candidate):
+                if attempt > 0:
+                    _debug_log(f"Resolved board after retry #{attempt}: {_safe_obj_desc(candidate)}")
+                else:
+                    _debug_log(f"Resolved board object: {_safe_obj_desc(candidate)}")
+                return candidate
+
+        if hasattr(pcbnew, "BOARD"):
+            for candidate in candidates:
+                try:
+                    cast_board = pcbnew.BOARD(candidate)
+                except Exception:
+                    continue
                 if _board_api_usable(cast_board):
-                    _debug_log(f"Resolved board via cast: {_safe_obj_desc(cast_board)}")
+                    if attempt > 0:
+                        _debug_log(f"Resolved board via cast after retry #{attempt}: {_safe_obj_desc(cast_board)}")
+                    else:
+                        _debug_log(f"Resolved board via cast: {_safe_obj_desc(cast_board)}")
                     return cast_board
-            except Exception:
-                pass
-    _debug_log("Failed to resolve active board object.")
+
+        if attempt < retries - 1:
+            time.sleep(float(retry_delay_s))
+
+    _debug_log("Failed to resolve active board object after retries.")
     return None
 
 
