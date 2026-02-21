@@ -17,14 +17,18 @@ C:\Users\<user_folder>\Documents\KiCad\7.0\scripting\plugins\viastitching
 
 ## KiCad 9 IPC mode (undo/redo-safe backend)
 
-This repo now includes an IPC plugin manifest (`plugin.json`) and IPC action entrypoint (`ipc/viastitching_ipc.py`).
+This repo now includes a KiCad 9 IPC plugin manifest (`plugin.json`) and IPC entrypoints:
+- `ipc/update_via_array.py`
+- `ipc/remove_via_array.py`
+- `ipc/clean_orphan_vias.py`
 
 For KiCad 9:
 1. Enable `Preferences -> Plugins -> Enable KiCad API`.
 2. Make sure the plugin environment installs `requirements.txt`.
-3. Use the IPC action `Update Via Array` for transactional edits.
+3. Use the IPC actions from the plugin menu.
 
-The IPC action groups add/remove work into one commit using KiCad `begin_commit/push_commit`, so one Undo should revert the whole array operation.
+The IPC backend (`ipc/viastitching_ipc.py`) groups each operation into a single KiCad board commit (`begin_commit/push_commit`), so Undo/Redo is coherent for create/remove/update actions.
+Plugin ownership/settings are stored in PCB-embedded metadata (not only local plugin files), so reverting PCB commits also reverts array ownership state.
 
 ## How it works
 
