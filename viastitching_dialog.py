@@ -448,6 +448,8 @@ class ViaStitchingDialog(viastitching_gui):
         }
         self.selection_timer = wx.Timer(self)
         self.parent_window = parent
+        self._action_in_progress = False
+        self._selection_timer_was_running = False
 
         if hasattr(self, "m_chkDebugLogging"):
             self.m_chkDebugLogging.SetValue(_is_logging_enabled())
@@ -1625,6 +1627,8 @@ class ViaStitchingDialog(viastitching_gui):
         return changed
 
     def onSelectionPoll(self, event):
+        if getattr(self, "_action_in_progress", False):
+            return
         changed = self.RefreshSelectionContext()
         if changed:
             self.UpdateActionButtons(refresh_orphan_scan=False)
@@ -1632,6 +1636,27 @@ class ViaStitchingDialog(viastitching_gui):
             self.UpdateActionButtons(refresh_orphan_scan=False)
 
         self._last_selection_signature = self.SelectionSignature()
+
+    def BeginActionContext(self):
+        _debug_log("BeginActionContext: freezing selection polling")
+        self._action_in_progress = True
+        self._selection_timer_was_running = False
+        try:
+            if hasattr(self, "selection_timer") and self.selection_timer.IsRunning():
+                self._selection_timer_was_running = True
+                self.selection_timer.Stop()
+        except Exception:
+            self._selection_timer_was_running = False
+
+    def EndActionContext(self):
+        _debug_log("EndActionContext: restoring selection polling")
+        self._action_in_progress = False
+        try:
+            if getattr(self, "_selection_timer_was_running", False):
+                self.selection_timer.Start(600)
+        except Exception:
+            pass
+        self._selection_timer_was_running = False
 
     def ConfirmNetSelectionMismatch(self, action_name):
         displayed_net = self.GetDisplayedNet()
@@ -2214,47 +2239,51 @@ class ViaStitchingDialog(viastitching_gui):
             _debug_log("onProcessAction: canceled by net mismatch warning")
             return
         _debug_log("onProcessAction: start")
+        self.BeginActionContext()
 
-        zone_name = self.area.GetZoneName()
-        created_zone_name = False
-        if zone_name == "":
-            for i in range(1000):
-                candidate_name = f"stitch_zone_{i}"
-                if candidate_name not in self.config.keys():
-                    zone_name = candidate_name
-                    break
+        try:
+            zone_name = self.area.GetZoneName()
+            created_zone_name = False
+            if zone_name == "":
+                for i in range(1000):
+                    candidate_name = f"stitch_zone_{i}"
+                    if candidate_name not in self.config.keys():
+                        zone_name = candidate_name
+                        break
+                else:
+                    wx.LogError("Tried 1000 different names and all were taken. Please give a name to the zone.")
+                    self.Destroy()
+                    return
+                created_zone_name = True
+                self.viagroupname = __viagroupname_base__ + zone_name
+
+            commit = self.NewBoardCommit()
+            if commit is None:
+                self.LogNoCommitBackend("onProcessAction")
+
+            self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
+            self.ClearEditorSelection()
+
+            include_user_vias = False
+            user_vias = self.CountUserNetViasInZone()
+            if user_vias > 0:
+                include_user_vias = self.PromptReplaceUserNetVias(user_vias)
+
+            if self.RestitchCurrentZone(show_message=True,
+                                        include_user_vias=include_user_vias,
+                                        commit=commit,
+                                        push_commit=False):
+                if created_zone_name:
+                    self.CommitModify(commit, self.area)
+                    self.area.SetZoneName(zone_name)
+                self.SaveConfig(zone_name, commit=commit)
+                self.CommitPush(commit, "ViaStitching: Update Array")
+                _debug_log("onProcessAction: success")
+                self.CloseDialog(wx.ID_OK)
             else:
-                wx.LogError("Tried 1000 different names and all were taken. Please give a name to the zone.")
-                self.Destroy()
-                return
-            created_zone_name = True
-            self.viagroupname = __viagroupname_base__ + zone_name
-
-        commit = self.NewBoardCommit()
-        if commit is None:
-            self.LogNoCommitBackend("onProcessAction")
-
-        self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
-        self.ClearEditorSelection()
-
-        include_user_vias = False
-        user_vias = self.CountUserNetViasInZone()
-        if user_vias > 0:
-            include_user_vias = self.PromptReplaceUserNetVias(user_vias)
-
-        if self.RestitchCurrentZone(show_message=True,
-                                    include_user_vias=include_user_vias,
-                                    commit=commit,
-                                    push_commit=False):
-            if created_zone_name:
-                self.CommitModify(commit, self.area)
-                self.area.SetZoneName(zone_name)
-            self.SaveConfig(zone_name, commit=commit)
-            self.CommitPush(commit, "ViaStitching: Update Array")
-            _debug_log("onProcessAction: success")
-            self.CloseDialog(wx.ID_OK)
-        else:
-            _debug_log("onProcessAction: no vias placed")
+                _debug_log("onProcessAction: no vias placed")
+        finally:
+            self.EndActionContext()
 
     def onClearAction(self, event):
         """Manage clear vias button (Clear) click event."""
@@ -2268,27 +2297,31 @@ class ViaStitchingDialog(viastitching_gui):
         if not self.ConfirmNetSelectionMismatch(_(u"remove via array")):
             _debug_log("onClearAction: canceled by net mismatch warning")
             return
+        self.BeginActionContext()
 
-        include_user_vias = False
-        user_vias = self.CountUserNetViasInZone()
-        if user_vias > 0:
-            include_user_vias = self.PromptRemoveUserNetVias(user_vias)
+        try:
+            include_user_vias = False
+            user_vias = self.CountUserNetViasInZone()
+            if user_vias > 0:
+                include_user_vias = self.PromptRemoveUserNetVias(user_vias)
 
-        commit = self.NewBoardCommit()
-        if commit is None:
-            self.LogNoCommitBackend("onClearAction")
-        if self.ClearArea(show_message=False, commit=commit, push_commit=False, include_user_vias=include_user_vias):
-            zone_name = self.area.GetZoneName()
-            if zone_name:
-                self.SaveConfig(zone_name, commit=commit)
-            else:
-                self.SaveLastUsedConfig(commit=commit)
-            if self.CountExistingOwnedVias() == 0:
-                self.RemoveCurrentStitchGroup(commit=commit, push_commit=False)
-            self.CommitPush(commit, "ViaStitching: Remove Array")
-            self.UpdateActionButtons()
-            _debug_log("onClearAction: success")
-            self.CloseDialog(wx.ID_OK)
+            commit = self.NewBoardCommit()
+            if commit is None:
+                self.LogNoCommitBackend("onClearAction")
+            if self.ClearArea(show_message=False, commit=commit, push_commit=False, include_user_vias=include_user_vias):
+                zone_name = self.area.GetZoneName()
+                if zone_name:
+                    self.SaveConfig(zone_name, commit=commit)
+                else:
+                    self.SaveLastUsedConfig(commit=commit)
+                if self.CountExistingOwnedVias() == 0:
+                    self.RemoveCurrentStitchGroup(commit=commit, push_commit=False)
+                self.CommitPush(commit, "ViaStitching: Remove Array")
+                self.UpdateActionButtons()
+                _debug_log("onClearAction: success")
+                self.CloseDialog(wx.ID_OK)
+        finally:
+            self.EndActionContext()
 
     def onCleanOrphansAction(self, event):
         _debug_log("onCleanOrphansAction: start")
