@@ -530,11 +530,7 @@ class ViaStitchingDialog(viastitching_gui):
         zone_name = self.area.GetZoneName() if self.area is not None else ""
         zone_defaults = self.config.get(zone_name, {}) if zone_name else {}
         global_defaults = self.config.get(__global_settings_key__, {})
-        owned_vias = zone_defaults.get("OwnedVias", [])
-        if isinstance(owned_vias, list):
-            self.owned_via_ids = {str(v) for v in owned_vias if v}
-        else:
-            self.owned_via_ids = set()
+        self.LoadOwnedViasForZone(self.area)
         defaults = {}
         defaults.update(global_defaults)
         defaults.update(zone_defaults)
@@ -545,6 +541,7 @@ class ViaStitchingDialog(viastitching_gui):
             for group in self.GetGroups():
                 if group.GetName() == self.viagroupname:
                     self.pcb_group = group
+            self.RefreshOwnedViasState()
         else:
             self.viagroupname = None
 
@@ -838,6 +835,27 @@ class ViaStitchingDialog(viastitching_gui):
         if self.owned_via_ids:
             self.owned_via_ids &= existing_ids
         self.owned_via_ids |= group_ids
+
+    def LoadOwnedViasForZone(self, zone=None):
+        if zone is None:
+            zone = self.area
+        if zone is None:
+            self.owned_via_ids = set()
+            return
+
+        zone_name = ""
+        try:
+            zone_name = zone.GetZoneName()
+        except Exception:
+            zone_name = ""
+
+        zone_cfg = self.config.get(zone_name, {}) if zone_name else {}
+        owned = zone_cfg.get("OwnedVias", []) if isinstance(zone_cfg, dict) else []
+        if isinstance(owned, list):
+            self.owned_via_ids = {str(v) for v in owned if v}
+        else:
+            self.owned_via_ids = set()
+        self.RefreshOwnedViasState()
 
     def CountUserNetViasInZone(self):
         if self.area is None or not self.net:
@@ -1600,6 +1618,7 @@ class ViaStitchingDialog(viastitching_gui):
 
     def RefreshSelectionContext(self):
         previous_signature = self.SelectionSignature()
+        previous_zone_name = self.area.GetZoneName() if self.area is not None else ""
 
         zone = self.FindSelectedValidZone()
         if zone is None:
@@ -1607,6 +1626,7 @@ class ViaStitchingDialog(viastitching_gui):
             self.net = None
             self.viagroupname = None
             self.pcb_group = None
+            self.owned_via_ids = set()
             self.SetDisplayedNet("")
             self.has_valid_selection = False
         else:
@@ -1614,6 +1634,8 @@ class ViaStitchingDialog(viastitching_gui):
             self.net = zone.GetNetname()
             self.viagroupname = __viagroupname_base__ + zone.GetZoneName()
             self.pcb_group = self.FindGroupByName(self.viagroupname)
+            if zone.GetZoneName() != previous_zone_name:
+                self.LoadOwnedViasForZone(zone)
             self.SetDisplayedNet(self.net)
             self.has_valid_selection = bool(self.net)
 
@@ -2052,16 +2074,20 @@ class ViaStitchingDialog(viastitching_gui):
                         phase_viacount += 1
                         continue
 
-                    if self.pcb_group is None and commit is not None:
+                    if self.pcb_group is None:
                         self.EnsureCurrentZoneGroup(commit=commit)
 
                     via.SetWidth(viasize)
                     via.SetDrill(drillsize)
                     self.board.Add(via)
                     self.CommitAdd(commit, via)
-                    if self.pcb_group is not None and commit is not None:
-                        self.CommitModify(commit, self.pcb_group)
-                        self.pcb_group.AddItem(via)
+                    if self.pcb_group is not None:
+                        if commit is not None:
+                            self.CommitModify(commit, self.pcb_group)
+                        try:
+                            self.pcb_group.AddItem(via)
+                        except Exception:
+                            pass
                     via_uuid = _item_uuid(via)
                     if via_uuid:
                         self.owned_via_ids.add(via_uuid)
@@ -2189,11 +2215,6 @@ class ViaStitchingDialog(viastitching_gui):
         return viacount > 0
 
     def EnsureCurrentZoneGroup(self, commit=None):
-        if commit is None:
-            # Without commit backend support, group edits are not reliably undoable.
-            _debug_log("EnsureCurrentZoneGroup: skipped because commit backend is unavailable")
-            return
-
         self.pcb_group = None
         for group in self.GetGroups():
             if group.GetName() == self.viagroupname:
@@ -2204,7 +2225,10 @@ class ViaStitchingDialog(viastitching_gui):
             self.pcb_group = pcbnew.PCB_GROUP(None)
             self.pcb_group.SetName(self.viagroupname)
             self.board.Add(self.pcb_group)
-            self.CommitAdd(commit, self.pcb_group)
+            if commit is not None:
+                self.CommitAdd(commit, self.pcb_group)
+            else:
+                _debug_log("EnsureCurrentZoneGroup: created group without commit backend")
             _debug_log(f"EnsureCurrentZoneGroup: created group {self.viagroupname}")
         self.EnsureZoneInGroup(commit=commit)
 
@@ -2320,6 +2344,13 @@ class ViaStitchingDialog(viastitching_gui):
                 self.UpdateActionButtons()
                 _debug_log("onClearAction: success")
                 self.CloseDialog(wx.ID_OK)
+            else:
+                _debug_log("onClearAction: no vias removed for current zone ownership set")
+                _show_info(
+                    self,
+                    _(u"ViaStitching"),
+                    _(u"No plugin-owned vias were found for the selected zone.")
+                )
         finally:
             self.EndActionContext()
 
