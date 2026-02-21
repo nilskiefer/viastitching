@@ -425,6 +425,8 @@ class ViaStitchingDialog(viastitching_gui):
             self.m_btnCleanOrphans.Bind(wx.EVT_BUTTON, self.onCleanOrphansAction)
         if hasattr(self, "m_chkDebugLogging"):
             self.m_chkDebugLogging.Bind(wx.EVT_CHECKBOX, self.onToggleLogging)
+        if hasattr(self, "m_chkMaximizeVias"):
+            self.m_chkMaximizeVias.Bind(wx.EVT_CHECKBOX, self.onToggleMaximizeMode)
         if hasattr(self, "m_btnResetPrompts"):
             self.m_btnResetPrompts.Bind(wx.EVT_BUTTON, self.onResetPromptChoices)
         self.board = _resolve_board(board)
@@ -576,6 +578,7 @@ class ViaStitchingDialog(viastitching_gui):
             self.m_chkCenterSegments.SetValue(defaults.get("CenterSegments", True))
         if hasattr(self, "m_chkMaximizeVias"):
             self.m_chkMaximizeVias.SetValue(defaults.get("MaximizeVias", False))
+        self.UpdateMaximizeModeUI()
         self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
 
         # Get default Vias dimensions
@@ -613,27 +616,12 @@ class ViaStitchingDialog(viastitching_gui):
         self.SetTooltips()
         self._legacy_commit_available = (self.NewBoardCommit() is not None)
         if not self._legacy_commit_available:
-            if hasattr(self, "m_btnOk"):
-                self.m_btnOk.Enable(False)
-                self.m_btnOk.SetToolTip(_(u"Use KiCad 9 IPC action: Update Via Array"))
-            if hasattr(self, "m_btnClear"):
-                self.m_btnClear.Enable(False)
-                self.m_btnClear.SetToolTip(_(u"Use KiCad 9 IPC action: Remove Via Array"))
-            if hasattr(self, "m_btnCleanOrphans"):
-                self.m_btnCleanOrphans.Enable(False)
-                self.m_btnCleanOrphans.SetToolTip(_(u"Use KiCad 9 IPC action: Clean Orphan Vias"))
-            _show_info(
-                self,
-                _(u"ViaStitching"),
-                _(
-                    u"Legacy action-plugin edits are disabled on this KiCad build because undo transactions are unavailable.\n\n"
-                    u"Use the KiCad 9 IPC actions for reliable undo/redo."
-                )
+            _debug_log(
+                "BOARD_COMMIT backend unavailable in this KiCad build; "
+                "continuing with direct board edits and native undo handling."
             )
         self.UpdateActionButtons()
-
-        self.Bind(wx.EVT_TIMER, self.onSelectionPoll, self.selection_timer)
-        self.selection_timer.Start(600)
+        self._last_selection_signature = self.SelectionSignature()
 
     def SetTooltips(self):
         tips = [
@@ -642,12 +630,12 @@ class ViaStitchingDialog(viastitching_gui):
             (self.m_lblVia, _(u"Via outer diameter and drill size.")),
             (self.m_txtViaSize, _(u"Via outer diameter.")),
             (self.m_txtViaDrillSize, _(u"Via drill diameter. Must be smaller than via size.")),
-            (self.m_lblSpacing, _(u"Grid spacing between vias: vertical / horizontal.")),
-            (self.m_txtVSpacing, _(u"Vertical spacing between via centers.")),
-            (self.m_txtHSpacing, _(u"Horizontal spacing between via centers.")),
-            (self.m_lblOffset, _(u"Grid offsets: vertical / horizontal.")),
-            (self.m_txtVOffset, _(u"Vertical offset of the via grid.")),
-            (self.m_txtHOffset, _(u"Horizontal offset of the via grid.")),
+            (self.m_lblSpacing, _(u"Grid spacing between vias: vertical / horizontal. Ignored when maximize is enabled.")),
+            (self.m_txtVSpacing, _(u"Vertical spacing between via centers. Ignored when maximize is enabled.")),
+            (self.m_txtHSpacing, _(u"Horizontal spacing between via centers. Ignored when maximize is enabled.")),
+            (self.m_lblOffset, _(u"Grid offsets: vertical / horizontal. Ignored when maximize is enabled.")),
+            (self.m_txtVOffset, _(u"Vertical offset of the via grid. Ignored when maximize is enabled.")),
+            (self.m_txtHOffset, _(u"Horizontal offset of the via grid. Ignored when maximize is enabled.")),
             (self.m_staticText6, _(u"Extra distance from via edge to zone boundary.")),
             (self.m_txtClearance, _(u"Edge margin: via edge to zone boundary distance.")),
             (self.m_staticTextPadMargin, _(u"Extra distance from vias to pads/tracks/vias/zones during overlap checks.")),
@@ -656,7 +644,7 @@ class ViaStitchingDialog(viastitching_gui):
             (self.m_chkRandomize, _(u"Apply small random jitter to each grid point.")),
             (self.m_chkIncludeOtherLayers, _(u"If enabled, reject vias that collide with copper objects on any copper layer. Disable to only check the selected zone layer.")),
             (self.m_chkCenterSegments, _(u"If enabled, each reachable segment in a discontinuous row is centered for a neater pattern.")),
-            (self.m_chkMaximizeVias, _(u"Try multiple grid phases and segment packing to place as many vias as possible while respecting margins.")),
+            (self.m_chkMaximizeVias, _(u"Use non-grid dense candidate packing to maximize via count using pad-margin/edge-margin and overlap checks.")),
             (self.m_chkDebugLogging, _(u"Write detailed runtime logs to viastitching_debug.log in the plugin folder.")),
             (self.m_btnOk, _(u"Apply stitching with current parameters.")),
             (self.m_btnClear, _(u"Remove plugin-owned vias. If matching user vias are found on this zone net, you can choose to remove them too.")),
@@ -668,6 +656,28 @@ class ViaStitchingDialog(viastitching_gui):
         for control, tip in tips:
             if control is not None:
                 control.SetToolTip(tip)
+
+    def UpdateMaximizeModeUI(self):
+        maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+        enable_grid_controls = not maximize_vias
+        controls = (
+            self.m_lblSpacing,
+            self.m_txtVSpacing,
+            self.m_txtHSpacing,
+            self.m_lblOffset,
+            self.m_txtVOffset,
+            self.m_txtHOffset,
+            self.m_lblUnit2,
+            self.m_lblUnit3,
+        )
+        for control in controls:
+            if control is not None:
+                control.Enable(enable_grid_controls)
+
+    def onToggleMaximizeMode(self, event):
+        self.UpdateMaximizeModeUI()
+        if event is not None:
+            event.Skip()
 
     def GetGroups(self):
         if hasattr(self.board, "Groups"):
@@ -807,7 +817,7 @@ class ViaStitchingDialog(viastitching_gui):
         details = self.last_commit_error or "No constructor details captured."
         _debug_log(
             f"No commit backend available in {context}. "
-            "Operation canceled to avoid unsafe non-undoable edits.\n"
+            "Proceeding with direct board edits; undo grouping is handled by KiCad.\n"
             f"{details}"
         )
 
@@ -817,21 +827,6 @@ class ViaStitchingDialog(viastitching_gui):
             return commit
 
         self.LogNoCommitBackend(context)
-        if show_popup:
-            _show_error_with_log(
-                self,
-                _(u"ViaStitching"),
-                _(
-                    u"Proper undo/redo support is unavailable in this legacy action-plugin API on your KiCad build.\n\n"
-                    u"To avoid board corruption/crashes, this operation was canceled.\n\n"
-                    u"Use the KiCad 9 IPC actions instead:\n"
-                    u" - Update Via Array\n"
-                    u" - Remove Via Array\n"
-                    u" - Clean Orphan Vias\n\n"
-                    u"Also ensure: Preferences -> Plugins -> Enable KiCad API"
-                ),
-                context=f"undo_required_{context}"
-            )
         return None
 
     def CloseDialog(self, modal_code=wx.ID_CANCEL):
@@ -861,13 +856,91 @@ class ViaStitchingDialog(viastitching_gui):
         except Exception:
             pass
 
-    def GetViaParentGroup(self, via):
-        if via is None or not hasattr(via, "GetParentGroup"):
+    def GetItemParentGroup(self, item):
+        if item is None or not hasattr(item, "GetParentGroup"):
             return None
         try:
-            return via.GetParentGroup()
+            return item.GetParentGroup()
         except Exception:
             return None
+
+    def GetViaParentGroup(self, via):
+        return self.GetItemParentGroup(via)
+
+    def GetGroupNameSafe(self, group):
+        if group is None:
+            return ""
+        try:
+            return group.GetName() or ""
+        except Exception:
+            return ""
+
+    def DetachItemFromGroup(self, item, commit=None, expected_group=None):
+        if item is None:
+            return False
+
+        parent = self.GetItemParentGroup(item)
+        if parent is None:
+            return False
+
+        parent_name = self.GetGroupNameSafe(parent)
+        expected_name = self.GetGroupNameSafe(expected_group)
+        if expected_group is not None and parent is not expected_group and (
+            not parent_name or not expected_name or parent_name != expected_name
+        ):
+            return False
+
+        self.CommitModify(commit, parent)
+        self.CommitModify(commit, item)
+
+        detached = False
+        if hasattr(parent, "RemoveItem"):
+            try:
+                parent.RemoveItem(item)
+                detached = True
+            except Exception as e:
+                _debug_log(
+                    "DetachItemFromGroup: parent.RemoveItem failed "
+                    f"parent={_safe_obj_desc(parent)} item={_safe_obj_desc(item)} "
+                    f"error={type(e).__name__}: {e}"
+                )
+
+        if not detached and hasattr(item, "SetParentGroup"):
+            try:
+                item.SetParentGroup(None)
+                detached = True
+            except Exception as e:
+                _debug_log(
+                    "DetachItemFromGroup: item.SetParentGroup(None) failed "
+                    f"item={_safe_obj_desc(item)} error={type(e).__name__}: {e}"
+                )
+
+        remaining_parent = self.GetItemParentGroup(item)
+        if remaining_parent is not None and (
+            parent is remaining_parent
+            or self.GetGroupNameSafe(remaining_parent) == parent_name
+        ):
+            _debug_log(
+                "DetachItemFromGroup: item still reports same parent after detach attempt "
+                f"parent={_safe_obj_desc(remaining_parent)} item={_safe_obj_desc(item)}"
+            )
+            return False
+        return detached
+
+    def EnsureZoneDetachedFromViaGroup(self, commit=None):
+        if self.area is None:
+            return
+        parent = self.GetItemParentGroup(self.area)
+        if parent is None:
+            return
+        parent_name = self.GetGroupNameSafe(parent)
+        if not parent_name.startswith(__viagroupname_base__):
+            return
+        detached = self.DetachItemFromGroup(self.area, commit=commit, expected_group=parent)
+        _debug_log(
+            f"EnsureZoneDetachedFromViaGroup: parent={parent_name if parent_name else '<unnamed>'} "
+            f"detached={detached}"
+        )
 
     def RefreshOwnedViasState(self):
         if self.viagroupname:
@@ -1070,13 +1143,6 @@ class ViaStitchingDialog(viastitching_gui):
         self.config_textbox.SetText(json.dumps(self.config, indent=2))
 
     def UpdateActionButtons(self, refresh_orphan_scan=True):
-        if not getattr(self, "_legacy_commit_available", True):
-            self.m_btnOk.Enable(False)
-            self.m_btnClear.Enable(False)
-            if hasattr(self, "m_btnCleanOrphans"):
-                self.m_btnCleanOrphans.Enable(False)
-            return
-
         selection_ok = self.IsSelectionValid()
         self.m_btnOk.Enable(selection_ok)
 
@@ -1148,6 +1214,16 @@ class ViaStitchingDialog(viastitching_gui):
         parent_group = self.GetViaParentGroup(via)
         if parent_group is not None:
             self.CommitModify(commit, parent_group)
+            self.CommitModify(commit, via)
+            if hasattr(parent_group, "RemoveItem"):
+                try:
+                    parent_group.RemoveItem(via)
+                except Exception as e:
+                    _debug_log(
+                        "SafeRemoveViaWithCommit: failed to remove via from parent group "
+                        f"group={_safe_obj_desc(parent_group)} via={_safe_obj_desc(via)} "
+                        f"error={type(e).__name__}: {e}"
+                    )
         self.CommitRemove(commit, via)
         self.SafeRemoveVia(via)
 
@@ -1187,18 +1263,8 @@ class ViaStitchingDialog(viastitching_gui):
                     pass
 
     def EnsureZoneInGroup(self, commit=None):
-        if self.pcb_group is None or self.area is None:
-            return
-        if hasattr(self.area, "GetParentGroup"):
-            parent = self.area.GetParentGroup()
-            if parent is not None and parent.GetName() == self.viagroupname:
-                return
-        try:
-            self.CommitModify(commit, self.pcb_group)
-            self.CommitModify(commit, self.area)
-            self.pcb_group.AddItem(self.area)
-        except Exception:
-            pass
+        # Keep compatibility with previous call sites while avoiding sticky zone grouping.
+        self.EnsureZoneDetachedFromViaGroup(commit=commit)
 
     def FindGroupByName(self, name):
         for group in self.GetGroups():
@@ -1217,13 +1283,8 @@ class ViaStitchingDialog(viastitching_gui):
         self.ClearEditorSelection()
 
         try:
-            if hasattr(group, "RemoveItem") and self.area is not None:
-                try:
-                    self.CommitModify(commit, group)
-                    self.CommitModify(commit, self.area)
-                    group.RemoveItem(self.area)
-                except Exception:
-                    pass
+            if self.area is not None:
+                self.DetachItemFromGroup(self.area, commit=commit, expected_group=group)
 
             self.CommitRemove(commit, group)
             self.board.Remove(group)
@@ -1469,7 +1530,8 @@ class ViaStitchingDialog(viastitching_gui):
             _show_error_with_log(self, _(u"ViaStitching"), _(u"Please enter valid numeric values."), context="validate_numeric")
             return None
 
-        if inputs["step_x"] <= 0 or inputs["step_y"] <= 0:
+        maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+        if (not maximize_vias) and (inputs["step_x"] <= 0 or inputs["step_y"] <= 0):
             _show_error_with_log(self, _(u"ViaStitching"), _(u"Spacing values must be greater than 0."), context="validate_spacing")
             return None
         if inputs["viasize"] <= 0 or inputs["drillsize"] <= 0:
@@ -1819,8 +1881,6 @@ class ViaStitchingDialog(viastitching_gui):
         _debug_log(f"ClearArea: start include_user_vias={include_user_vias}")
         if commit is None:
             commit = self.RequireUndoBackend("ClearArea", show_popup=show_message)
-        if commit is None:
-            return False
         self.RefreshOwnedViasState()
         self.ClearEditorSelection()
         to_remove = []
@@ -2007,8 +2067,6 @@ class ViaStitchingDialog(viastitching_gui):
             return False
         if commit is None:
             commit = self.RequireUndoBackend("FillupArea", show_popup=show_message)
-        if commit is None:
-            return False
         viacount = 0
         candidates = 0
         inside_zone = 0
@@ -2178,9 +2236,217 @@ class ViaStitchingDialog(viastitching_gui):
             )
             return False
 
-        best_phase_x = offset_x
-        best_phase_y = offset_y
+        def _new_probe_via(point):
+            via = pcbnew.PCB_VIA(self.board)
+            via.SetPosition(point)
+            if hasattr(via, "SetViaType") and hasattr(pcbnew, "VIATYPE_THROUGH"):
+                via.SetViaType(pcbnew.VIATYPE_THROUGH)
+            if hasattr(via, "SetLayerPair"):
+                fcu = getattr(pcbnew, "F_Cu", None)
+                bcu = getattr(pcbnew, "B_Cu", None)
+                if fcu is not None and bcu is not None:
+                    via.SetLayerPair(fcu, bcu)
+            elif hasattr(via, "SetLayerSet"):
+                via.SetLayerSet(layer_set)
+            via.SetNetCode(netcode)
+            via.SetDrill(drillsize + 2 * pad_margin)
+            via.SetWidth(viasize + 2 * pad_margin)
+            return via
+
+        def _add_real_via(point):
+            via = pcbnew.PCB_VIA(self.board)
+            via.SetPosition(point)
+            if hasattr(via, "SetViaType") and hasattr(pcbnew, "VIATYPE_THROUGH"):
+                via.SetViaType(pcbnew.VIATYPE_THROUGH)
+            if hasattr(via, "SetLayerPair"):
+                fcu = getattr(pcbnew, "F_Cu", None)
+                bcu = getattr(pcbnew, "B_Cu", None)
+                if fcu is not None and bcu is not None:
+                    via.SetLayerPair(fcu, bcu)
+            elif hasattr(via, "SetLayerSet"):
+                via.SetLayerSet(layer_set)
+            via.SetNetCode(netcode)
+            via.SetWidth(viasize)
+            via.SetDrill(drillsize)
+            self.board.Add(via)
+            self.CommitAdd(commit, via)
+            if self.pcb_group is not None:
+                if commit is not None:
+                    self.CommitModify(commit, self.pcb_group)
+                try:
+                    self.pcb_group.AddItem(via)
+                except Exception:
+                    pass
+            via_uuid = _item_uuid(via)
+            if via_uuid:
+                self.owned_via_ids.add(via_uuid)
+
+        def _run_maximize_pack():
+            via_clearance = max(1, int(round(viasize + (2 * pad_margin))))
+            via_clearance_sq = via_clearance * via_clearance
+
+            sample_x = max(1, int(round(via_clearance / 2.0)))
+            sample_y = max(1, int(round(via_clearance / 2.0)))
+
+            width = max(1, int(right - left + 1))
+            height = max(1, int(bottom - top + 1))
+            max_candidate_limit = 12000
+            estimated = ((width // sample_x) + 1) * ((height // sample_y) + 1)
+            if estimated > max_candidate_limit:
+                scale = math.sqrt(float(estimated) / float(max_candidate_limit))
+                sample_x = max(1, int(math.ceil(sample_x * scale)))
+                sample_y = max(1, int(math.ceil(sample_y * scale)))
+
+            tested = 0
+            inside = 0
+            reject_edge = 0
+            reject_overlap_static = 0
+            candidates_xy = []
+
+            y_start = top
+            row_index = 0
+            yv = y_start
+            while yv <= bottom:
+                x_start = left
+                if row_index % 2 == 1:
+                    x_start += sample_x / 2.0
+                xv = x_start
+                while xv <= right:
+                    tested += 1
+                    p = self.ToBoardPoint(xv, yv)
+                    if not self.IsPointInsideZoneWithMargin(p, required_edge_margin):
+                        reject_edge += 1
+                        xv += sample_x
+                        continue
+                    inside += 1
+
+                    probe = _new_probe_via(p)
+                    if self.CheckOverlap(probe):
+                        reject_overlap_static += 1
+                        xv += sample_x
+                        continue
+
+                    candidates_xy.append((int(round(xv)), int(round(yv)), p))
+                    xv += sample_x
+                yv += sample_y
+                row_index += 1
+
+            if not candidates_xy:
+                return {
+                    "inserted": 0,
+                    "candidates": tested,
+                    "inside_zone": inside,
+                    "rejected_overlap": reject_overlap_static,
+                    "rejected_edge_margin": reject_edge,
+                }
+
+            cell_size = max(1, int(via_clearance))
+            max_sep = via_clearance
+            neighbor_span = max(1, int(math.ceil(float(max_sep) / float(cell_size))))
+
+            candidate_bins = {}
+            for idx, (cx, cy, _) in enumerate(candidates_xy):
+                key = (cx // cell_size, cy // cell_size)
+                candidate_bins.setdefault(key, []).append(idx)
+
+            def _conflict(idx_a, idx_b):
+                ax, ay, _ = candidates_xy[idx_a]
+                bx, by, _ = candidates_xy[idx_b]
+                dx = abs(ax - bx)
+                dy = abs(ay - by)
+                return (dx * dx + dy * dy) < via_clearance_sq
+
+            def _neighbor_indices(xc, yc, bins_dict):
+                base_x = xc // cell_size
+                base_y = yc // cell_size
+                for gx in range(base_x - neighbor_span, base_x + neighbor_span + 1):
+                    for gy in range(base_y - neighbor_span, base_y + neighbor_span + 1):
+                        for other_idx in bins_dict.get((gx, gy), []):
+                            yield other_idx
+
+            conflict_counts = [0] * len(candidates_xy)
+            for idx, (cx, cy, _) in enumerate(candidates_xy):
+                count = 0
+                for other_idx in _neighbor_indices(cx, cy, candidate_bins):
+                    if other_idx == idx:
+                        continue
+                    if _conflict(idx, other_idx):
+                        count += 1
+                conflict_counts[idx] = count
+
+            zone_name = self.area.GetZoneName() if self.area is not None else ""
+            seed = (
+                int(netcode) * 1000003
+                + int(viasize) * 9176
+                + int(edge_margin) * 613
+                + int(pad_margin) * 307
+                + len(zone_name) * 53
+            )
+            rng = random.Random(seed)
+
+            best_selection = []
+            greedy_passes = 28
+            index_list = list(range(len(candidates_xy)))
+
+            for pass_idx in range(greedy_passes):
+                if pass_idx == 0:
+                    order = sorted(
+                        index_list,
+                        key=lambda i: (conflict_counts[i], candidates_xy[i][1], candidates_xy[i][0]),
+                    )
+                else:
+                    order = sorted(
+                        index_list,
+                        key=lambda i: (
+                            conflict_counts[i] + rng.random() * 1.5,
+                            rng.random(),
+                        ),
+                    )
+
+                selected = []
+                selected_bins = {}
+                for idx in order:
+                    cx, cy, _ = candidates_xy[idx]
+                    can_place = True
+                    for other_idx in _neighbor_indices(cx, cy, selected_bins):
+                        if _conflict(idx, other_idx):
+                            can_place = False
+                            break
+                    if not can_place:
+                        continue
+                    selected.append(idx)
+                    key = (cx // cell_size, cy // cell_size)
+                    selected_bins.setdefault(key, []).append(idx)
+
+                if len(selected) > len(best_selection):
+                    best_selection = selected
+
+            if self.pcb_group is None and best_selection:
+                self.EnsureCurrentZoneGroup(commit=commit)
+
+            for idx in best_selection:
+                _add_real_via(candidates_xy[idx][2])
+
+            rejected_overlap_total = reject_overlap_static + max(0, len(candidates_xy) - len(best_selection))
+            _debug_log(
+                "FillupArea maximize pack: "
+                f"sample=({sample_x},{sample_y}) candidates={len(candidates_xy)} "
+                f"selected={len(best_selection)} tested={tested} inside={inside} "
+                f"rejected_edge={reject_edge} rejected_overlap={rejected_overlap_total}"
+            )
+            return {
+                "inserted": len(best_selection),
+                "candidates": tested,
+                "inside_zone": inside,
+                "rejected_overlap": rejected_overlap_total,
+                "rejected_edge_margin": reject_edge,
+            }
+
         if maximize_vias:
+            applied = _run_maximize_pack()
+        else:
+            best_phase_x = offset_x
+            best_phase_y = offset_y
             x_phases = _phase_offsets(step_x, offset_x, 6 if not center_segments else 1)
             y_phases = _phase_offsets(step_y, offset_y, 8)
             best_score = None
@@ -2197,11 +2463,10 @@ class ViaStitchingDialog(viastitching_gui):
                         best_phase_x = phase_x
                         best_phase_y = phase_y
             _debug_log(
-                f"FillupArea maximize search: best_phase=({best_phase_x},{best_phase_y}) "
+                f"FillupArea phase search: best_phase=({best_phase_x},{best_phase_y}) "
                 f"score={best_score}"
             )
-
-        applied = _run_phase(best_phase_x, best_phase_y, apply_changes=True)
+            applied = _run_phase(best_phase_x, best_phase_y, apply_changes=True)
         viacount = applied["inserted"]
         candidates = applied["candidates"]
         inside_zone = applied["inside_zone"]
@@ -2294,13 +2559,11 @@ class ViaStitchingDialog(viastitching_gui):
             else:
                 _debug_log("EnsureCurrentZoneGroup: created group without commit backend")
             _debug_log(f"EnsureCurrentZoneGroup: created group {self.viagroupname}")
-        self.EnsureZoneInGroup(commit=commit)
+        self.EnsureZoneDetachedFromViaGroup(commit=commit)
 
     def RestitchCurrentZone(self, show_message=False, include_user_vias=False, commit=None, push_commit=False):
         if commit is None:
             commit = self.RequireUndoBackend("RestitchCurrentZone", show_popup=show_message)
-        if commit is None:
-            return False
         _debug_log(f"RestitchCurrentZone: start include_user_vias={include_user_vias}")
         self.pruned_stale_vias = 0
         self.pruned_stale_vias = self.PruneGroupedViasOutsideZone(commit=commit)
@@ -2346,8 +2609,6 @@ class ViaStitchingDialog(viastitching_gui):
                 self.viagroupname = __viagroupname_base__ + zone_name
 
             commit = self.RequireUndoBackend("onProcessAction")
-            if commit is None:
-                return
 
             self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
             self.ClearEditorSelection()
@@ -2394,8 +2655,6 @@ class ViaStitchingDialog(viastitching_gui):
                 include_user_vias = self.PromptRemoveUserNetVias(user_vias)
 
             commit = self.RequireUndoBackend("onClearAction")
-            if commit is None:
-                return
             if self.ClearArea(show_message=False, commit=commit, push_commit=False, include_user_vias=include_user_vias):
                 zone_name = self.area.GetZoneName()
                 if zone_name:
@@ -2452,8 +2711,6 @@ class ViaStitchingDialog(viastitching_gui):
             return
 
         commit = self.RequireUndoBackend("onCleanOrphansAction")
-        if commit is None:
-            return
 
         for via in orphan_vias:
             if commit is not None:
@@ -2585,8 +2842,12 @@ def InitViaStitchingDialog(board):
 
     if _active_dialog is not None:
         try:
+            if _active_dialog.IsModal():
+                _debug_log("InitViaStitchingDialog: dialog already open (modal), bringing to front")
+                _active_dialog.Raise()
+                return _active_dialog
             if _active_dialog.IsShown():
-                _debug_log("InitViaStitchingDialog: reopening because existing dialog is already open")
+                _debug_log("InitViaStitchingDialog: closing stale non-modal instance")
                 _active_dialog.CloseDialog(wx.ID_CANCEL)
         except Exception:
             pass
@@ -2600,13 +2861,20 @@ def InitViaStitchingDialog(board):
         return None
     _active_dialog = dlg
     dlg.Centre(wx.BOTH)
-    dlg.Show(True)
     try:
         dlg.Raise()
     except Exception:
         pass
-    _debug_log("InitViaStitchingDialog: dialog shown modeless and raised to front")
-    return dlg
+    _debug_log("InitViaStitchingDialog: dialog shown modal")
+    try:
+        dlg.ShowModal()
+    finally:
+        _active_dialog = None
+        try:
+            dlg.Destroy()
+        except Exception:
+            pass
+    return None
 
 
 class aVector():
