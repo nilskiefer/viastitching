@@ -40,6 +40,8 @@ DEFAULT_ZONE_SETTINGS: Dict[str, Any] = {
     "EdgeMargin": 0.00,
     "PadMargin": 0.00,
     "IncludeOtherLayers": True,
+    "CenterSegments": True,
+    "MaximizeVias": False,
 }
 
 
@@ -464,13 +466,13 @@ def _conflicts_with_obstacles(
 
 
 def _metadata_layer(board: Any) -> int:
-    layer_map = board.get_layer_names()
-    for lid, name in layer_map.items():
-        if str(name) == "Cmts.User":
-            return int(lid)
-    if hasattr(board, "get_active_layer"):
-        return int(board.get_active_layer())
-    return int(next(iter(layer_map.keys())))
+    layer = getattr(board, "active_layer", None)
+    if layer is not None:
+        try:
+            return int(layer)
+        except Exception:
+            pass
+    return 0
 
 
 def _metadata_position(zone: Optional[Zone]) -> Vector2:
@@ -536,44 +538,211 @@ def _validate_settings(settings: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
-def _build_candidates(
-    board: Any,
+def _phase_offsets(step: int, base_offset: int, samples: int) -> List[int]:
+    if step <= 0:
+        return [0]
+    out = {int(base_offset % step)}
+    if samples > 1:
+        for i in range(samples):
+            out.add(int((i * step) // samples))
+    return sorted(out)
+
+
+def _edge_intersections_x(points: Sequence[Tuple[int, int]], y: int) -> List[float]:
+    xs: List[float] = []
+    n = len(points)
+    if n < 3:
+        return xs
+
+    for i in range(n):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % n]
+        if y1 == y2:
+            continue
+        if (y1 <= y < y2) or (y2 <= y < y1):
+            t = (y - y1) / float(y2 - y1)
+            xs.append(x1 + t * (x2 - x1))
+    xs.sort()
+    return xs
+
+
+def _intervals_from_ring(points: Sequence[Tuple[int, int]], y: int) -> List[Tuple[float, float]]:
+    xs = _edge_intersections_x(points, y)
+    intervals: List[Tuple[float, float]] = []
+    for i in range(0, len(xs) - 1, 2):
+        a = xs[i]
+        b = xs[i + 1]
+        if b > a:
+            intervals.append((a, b))
+    return intervals
+
+
+def _merge_intervals(intervals: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    if not intervals:
+        return []
+    items = sorted(intervals, key=lambda t: (t[0], t[1]))
+    merged: List[Tuple[float, float]] = [items[0]]
+    for a, b in items[1:]:
+        la, lb = merged[-1]
+        if a <= lb:
+            merged[-1] = (la, max(lb, b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _subtract_intervals(
+    base: Sequence[Tuple[float, float]],
+    cuts: Sequence[Tuple[float, float]],
+) -> List[Tuple[float, float]]:
+    if not base:
+        return []
+    if not cuts:
+        return list(base)
+
+    out: List[Tuple[float, float]] = []
+    cuts_merged = _merge_intervals(cuts)
+    for a, b in base:
+        cur = a
+        for ca, cb in cuts_merged:
+            if cb <= cur:
+                continue
+            if ca >= b:
+                break
+            if ca > cur:
+                out.append((cur, min(ca, b)))
+            cur = max(cur, cb)
+            if cur >= b:
+                break
+        if cur < b:
+            out.append((cur, b))
+    return out
+
+
+def _row_intervals(polygons: Sequence[Any], y: int) -> List[Tuple[float, float]]:
+    intervals: List[Tuple[float, float]] = []
+    for poly in polygons:
+        outline_pts = _polygon_points(getattr(poly, "outline", None))
+        if len(outline_pts) < 3:
+            continue
+
+        filled = _intervals_from_ring(outline_pts, y)
+        if not filled:
+            continue
+
+        hole_intervals: List[Tuple[float, float]] = []
+        for hole in (getattr(poly, "holes", []) or []):
+            hole_pts = _polygon_points(hole)
+            if len(hole_pts) < 3:
+                continue
+            hole_intervals.extend(_intervals_from_ring(hole_pts, y))
+
+        if hole_intervals:
+            filled = _subtract_intervals(filled, hole_intervals)
+
+        intervals.extend(filled)
+    return _merge_intervals(intervals)
+
+
+def _grid_points_in_interval(a: float, b: float, start_x: int, step_x: int) -> List[int]:
+    left = int(math.ceil(a))
+    right = int(math.floor(b))
+    if right < left:
+        return []
+
+    k = int(math.ceil((left - start_x) / float(step_x)))
+    x = start_x + k * step_x
+    pts: List[int] = []
+    while x <= right:
+        pts.append(int(x))
+        x += step_x
+    return pts
+
+
+def _centered_points_in_interval(a: float, b: float, step_x: int, n: int) -> List[int]:
+    if n <= 0:
+        return []
+    span = b - a
+    used = (n - 1) * step_x
+    x0 = a + 0.5 * (span - used)
+    return [int(round(x0 + i * step_x)) for i in range(n)]
+
+
+def _row_segment_points(
+    intervals: Sequence[Tuple[float, float]],
+    step_x: int,
+    start_x: int,
+    center_segments: bool,
+    maximize_vias: bool,
+) -> List[int]:
+    row_points: List[int] = []
+    for a, b in intervals:
+        if b < a:
+            continue
+        grid_pts = _grid_points_in_interval(a, b, start_x, step_x)
+        if not center_segments:
+            row_points.extend(grid_pts)
+            continue
+
+        if maximize_vias:
+            n = int(math.floor((b - a) / float(step_x))) + 1
+        else:
+            n = len(grid_pts)
+
+        if n <= 0:
+            continue
+        row_points.extend(_centered_points_in_interval(a, b, step_x, n))
+
+    # De-duplicate and keep deterministic order.
+    return sorted(set(row_points))
+
+
+def _build_candidates_for_phase(
     zone: Zone,
     polygons: Sequence[Any],
     dims: Dict[str, int],
-    ignore_owned_ids: set[str],
-    include_other_layers: bool,
+    via_obstacles_seed: Sequence[Tuple[int, int, int]],
+    pad_obstacles: Sequence[Tuple[int, int, int]],
+    track_obstacles: Sequence[Tuple[int, int, int, int, int]],
+    phase_x: int,
+    phase_y: int,
+    center_segments: bool,
+    maximize_vias: bool,
 ) -> Tuple[List[Via], Dict[str, int]]:
-    zone_layers = _layer_set_of(zone)
     via_radius = dims["via_size"] // 2
-
-    via_obstacles = _gather_via_obstacles(board, ignore_owned_ids, zone_layers, include_other_layers)
-    pad_obstacles = _gather_pad_obstacles(board, zone_layers, include_other_layers)
-    track_obstacles = _gather_track_obstacles(board, zone_layers, include_other_layers)
+    via_obstacles = list(via_obstacles_seed)
 
     x0, y0, x1, y1 = _zone_bbox(zone)
-    start_x = x0 + ((dims["off_x"] - x0) % dims["step_x"])
-    start_y = y0 + ((dims["off_y"] - y0) % dims["step_y"])
+    start_x = x0 + ((phase_x - x0) % dims["step_x"])
+    start_y = y0 + ((phase_y - y0) % dims["step_y"])
 
-    candidates_tested = 0
-    inside_count = 0
-    rejected_overlap = 0
-    rejected_edge = 0
+    stats = {
+        "candidates_tested": 0,
+        "inside": 0,
+        "rejected_overlap": 0,
+        "rejected_edge": 0,
+    }
     new_vias: List[Via] = []
 
     y = start_y
     while y <= y1:
-        x = start_x
-        while x <= x1:
-            candidates_tested += 1
+        intervals = _row_intervals(polygons, y)
+        row_points = _row_segment_points(
+            intervals=intervals,
+            step_x=dims["step_x"],
+            start_x=start_x,
+            center_segments=center_segments,
+            maximize_vias=maximize_vias,
+        )
 
+        for x in row_points:
+            stats["candidates_tested"] += 1
             boundary_margin = via_radius + dims["edge_margin"]
             if not _point_inside_zone_with_margin(x, y, polygons, boundary_margin):
-                rejected_edge += 1
-                x += dims["step_x"]
+                stats["rejected_edge"] += 1
                 continue
 
-            inside_count += 1
+            stats["inside"] += 1
             if _conflicts_with_obstacles(
                 x=x,
                 y=y,
@@ -583,8 +752,7 @@ def _build_candidates(
                 pad_obstacles=pad_obstacles,
                 track_obstacles=track_obstacles,
             ):
-                rejected_overlap += 1
-                x += dims["step_x"]
+                stats["rejected_overlap"] += 1
                 continue
 
             via = Via()
@@ -593,20 +761,75 @@ def _build_candidates(
             via.drill_diameter = dims["via_drill"]
             via.net = zone.net
             new_vias.append(via)
-
-            # Keep spacing between newly created vias consistent with obstacle checks.
             via_obstacles.append((x, y, via_radius))
-            x += dims["step_x"]
 
         y += dims["step_y"]
 
-    stats = {
-        "candidates_tested": candidates_tested,
-        "inside": inside_count,
-        "rejected_overlap": rejected_overlap,
-        "rejected_edge": rejected_edge,
-    }
     return new_vias, stats
+
+
+def _build_candidates(
+    board: Any,
+    zone: Zone,
+    polygons: Sequence[Any],
+    dims: Dict[str, int],
+    ignore_owned_ids: set[str],
+    include_other_layers: bool,
+    center_segments: bool,
+    maximize_vias: bool,
+) -> Tuple[List[Via], Dict[str, int]]:
+    zone_layers = _layer_set_of(zone)
+    via_obstacles_seed = _gather_via_obstacles(board, ignore_owned_ids, zone_layers, include_other_layers)
+    pad_obstacles = _gather_pad_obstacles(board, zone_layers, include_other_layers)
+    track_obstacles = _gather_track_obstacles(board, zone_layers, include_other_layers)
+
+    x_phase_samples = 1
+    y_phase_samples = 1
+    if maximize_vias:
+        y_phase_samples = 8
+        if not center_segments:
+            x_phase_samples = 6
+
+    x_offsets = _phase_offsets(dims["step_x"], dims["off_x"], x_phase_samples)
+    y_offsets = _phase_offsets(dims["step_y"], dims["off_y"], y_phase_samples)
+
+    best_vias: List[Via] = []
+    best_stats: Dict[str, int] = {
+        "candidates_tested": 0,
+        "inside": 0,
+        "rejected_overlap": 0,
+        "rejected_edge": 0,
+    }
+    best_score: Optional[Tuple[int, int, int, int]] = None
+
+    for phase_y in y_offsets:
+        for phase_x in x_offsets:
+            vias, stats = _build_candidates_for_phase(
+                zone=zone,
+                polygons=polygons,
+                dims=dims,
+                via_obstacles_seed=via_obstacles_seed,
+                pad_obstacles=pad_obstacles,
+                track_obstacles=track_obstacles,
+                phase_x=phase_x,
+                phase_y=phase_y,
+                center_segments=center_segments,
+                maximize_vias=maximize_vias,
+            )
+
+            # Prefer most vias; then fewer total rejections; then fewer edge rejects.
+            score = (
+                len(vias),
+                -(stats["rejected_overlap"] + stats["rejected_edge"]),
+                -stats["rejected_edge"],
+                -phase_y,
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_vias = vias
+                best_stats = stats
+
+    return best_vias, best_stats
 
 
 def _via_inside_zone(via: Any, zone_polygons: Sequence[Any]) -> bool:
@@ -649,7 +872,13 @@ def _show_message(title: str, message: str, error: bool = False) -> None:
         print(f"{title}: {message}", file=stream)
 
 
-def _update_zone_array(runtime: Runtime, board: Any, zone: Zone) -> Dict[str, int]:
+def _update_zone_array(
+    runtime: Runtime,
+    board: Any,
+    zone: Zone,
+    force_maximize: Optional[bool] = None,
+    force_center_segments: Optional[bool] = None,
+) -> Dict[str, int]:
     polygons = _ensure_zone_filled(board, zone)
     metadata_item, metadata, old_meta_text = _find_metadata(board)
     legacy_blob = _find_legacy_config_blob(board)
@@ -667,6 +896,12 @@ def _update_zone_array(runtime: Runtime, board: Any, zone: Zone) -> Dict[str, in
     settings = _load_settings_for_zone(zone, zone_entry, legacy_blob)
     dims = _validate_settings(settings)
     include_other_layers = _to_bool(settings.get("IncludeOtherLayers"), True)
+    center_segments = _to_bool(settings.get("CenterSegments"), True)
+    maximize_vias = _to_bool(settings.get("MaximizeVias"), False)
+    if force_center_segments is not None:
+        center_segments = bool(force_center_segments)
+    if force_maximize is not None:
+        maximize_vias = bool(force_maximize)
 
     owned_ids = [str(v) for v in (zone_entry.get("owned_via_ids") or []) if str(v)]
     via_by_id = _index_by_id(board.get_vias())
@@ -679,6 +914,8 @@ def _update_zone_array(runtime: Runtime, board: Any, zone: Zone) -> Dict[str, in
         dims=dims,
         ignore_owned_ids=set(owned_ids),
         include_other_layers=include_other_layers,
+        center_segments=center_segments,
+        maximize_vias=maximize_vias,
     )
 
     if not new_vias:
@@ -880,7 +1117,8 @@ def run_mode(mode: str) -> int:
                 runtime.log(f"remove done: {result}")
                 return 0
 
-            result = _update_zone_array(runtime, board, zone)
+            force_maximize = True if mode == "update-maximize" else None
+            result = _update_zone_array(runtime, board, zone, force_maximize=force_maximize)
             msg = (
                 f"Placed {result['placed']} vias.\n"
                 f"Removed old plugin vias: {result['removed_old']}\n\n"

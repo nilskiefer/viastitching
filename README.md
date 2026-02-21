@@ -19,6 +19,7 @@ C:\Users\<user_folder>\Documents\KiCad\7.0\scripting\plugins\viastitching
 
 This repo now includes a KiCad 9 IPC plugin manifest (`plugin.json`) and IPC entrypoints:
 - `ipc/update_via_array.py`
+- `ipc/update_via_array_maximize.py`
 - `ipc/remove_via_array.py`
 - `ipc/clean_orphan_vias.py`
 
@@ -29,6 +30,7 @@ For KiCad 9:
 
 The IPC backend (`ipc/viastitching_ipc.py`) groups each operation into a single KiCad board commit (`begin_commit/push_commit`), so Undo/Redo is coherent for create/remove/update actions.
 Plugin ownership/settings are stored in PCB-embedded metadata (not only local plugin files), so reverting PCB commits also reverts array ownership state.
+The IPC placement engine centers via rows inside local discontinuous zone segments for neater arrays; a dedicated `Update Via Array (Maximize)` action runs multi-phase search to pack more vias while respecting edge/pad margins.
 
 ## How it works
 
