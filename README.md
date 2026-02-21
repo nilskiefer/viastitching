@@ -28,6 +28,8 @@ For KiCad 9:
 2. Make sure the plugin environment installs `requirements.txt`.
 3. Use the IPC actions from the plugin menu.
 
+The old `ActionPlugin` entrypoint is intentionally non-editing now: transactional commit support is not available there on this KiCad build, so all modifying operations are IPC-only.
+
 The IPC backend (`ipc/viastitching_ipc.py`) groups each operation into a single KiCad board commit (`begin_commit/push_commit`), so Undo/Redo is coherent for create/remove/update actions.
 Plugin ownership/settings are stored in PCB-embedded metadata (not only local plugin files), so reverting PCB commits also reverts array ownership state.
 The IPC placement engine centers via rows inside local discontinuous zone segments for neater arrays; a dedicated `Update Via Array (Maximize)` action runs multi-phase search to pack more vias while respecting edge/pad margins.
