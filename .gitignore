@@ -1,3 +1,5 @@
 *.pyc
 __pycache__/*
 viastitching_debug.log
+viastitching_user_prefs.json
+.DS_Store

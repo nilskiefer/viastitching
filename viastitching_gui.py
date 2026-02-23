@@ -66,7 +66,7 @@ class viastitching_gui ( wx.Dialog ):
 
 		bHSizer3 = wx.BoxSizer( wx.HORIZONTAL )
 
-		self.m_lblSpacing = wx.StaticText( self, wx.ID_ANY, _(u"Spacing (V/H)"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblSpacing = wx.StaticText( self, wx.ID_ANY, _(u"Spacing c-c (V/H)"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_lblSpacing.Wrap( -1 )
 
 		bHSizer3.Add( self.m_lblSpacing, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
@@ -156,6 +156,32 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_chkMaximizeVias.SetValue(False)
 		bLeftOptions.Add( self.m_chkMaximizeVias, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
+		bTargetSizer = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.m_chkTargetViaCount = wx.CheckBox( self, wx.ID_ANY, _(u"Place target vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkTargetViaCount.SetValue(False)
+		bTargetSizer.Add( self.m_chkTargetViaCount, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 6 )
+
+		self.m_txtTargetViaCount = wx.TextCtrl( self, wx.ID_ANY, _(u"100"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_txtTargetViaCount.SetMinSize( wx.Size( 72,-1 ) )
+		bTargetSizer.Add( self.m_txtTargetViaCount, 0, wx.ALIGN_CENTER_VERTICAL, 0 )
+
+		bLeftOptions.Add( bTargetSizer, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		bTargetPatternSizer = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.m_lblTargetPattern = wx.StaticText( self, wx.ID_ANY, _(u"Target pattern"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblTargetPattern.Wrap( -1 )
+
+		bTargetPatternSizer.Add( self.m_lblTargetPattern, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 6 )
+
+		m_choiceTargetPatternChoices = [ _(u"Grid"), _(u"45-degree offset"), _(u"Spiral") ]
+		self.m_choiceTargetPattern = wx.Choice( self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, m_choiceTargetPatternChoices, 0 )
+		self.m_choiceTargetPattern.SetSelection( 0 )
+		bTargetPatternSizer.Add( self.m_choiceTargetPattern, 0, wx.ALIGN_CENTER_VERTICAL, 0 )
+
+		bLeftOptions.Add( bTargetPatternSizer, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
 		self.m_chkCenterSegments = wx.CheckBox( self, wx.ID_ANY, _(u"Center local segments"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_chkCenterSegments.SetValue(True)
 		bLeftOptions.Add( self.m_chkCenterSegments, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
@@ -163,6 +189,14 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_chkIncludeOtherLayers = wx.CheckBox( self, wx.ID_ANY, _(u"Check overlaps on all copper layers (safer, slower)"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_chkIncludeOtherLayers.SetValue(True)
 		bLeftOptions.Add( self.m_chkIncludeOtherLayers, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		self.m_chkAvoidFootprintZones = wx.CheckBox( self, wx.ID_ANY, _(u"Block footprint copper/keepouts"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkAvoidFootprintZones.SetValue(True)
+		bLeftOptions.Add( self.m_chkAvoidFootprintZones, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		self.m_chkAllowSameNetUnderPad = wx.CheckBox( self, wx.ID_ANY, _(u"Allow same-net under-pad placement"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkAllowSameNetUnderPad.SetValue(False)
+		bLeftOptions.Add( self.m_chkAllowSameNetUnderPad, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
 		self.m_chkRandomize = wx.CheckBox( self, wx.ID_ANY, _(u"Randomize"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		bLeftOptions.Add( self.m_chkRandomize, 0, wx.ALIGN_LEFT|wx.ALL, 2 )

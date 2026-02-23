@@ -41,9 +41,13 @@ __pref_key_close_previous_window__ = "close_previous_window"
 __pref_key_remove_user_vias__ = "remove_user_vias"
 __pref_key_replace_user_vias__ = "replace_user_vias"
 __pref_key_rebuild_zone_copper__ = "rebuild_zone_copper"
+__pref_key_target_heuristic_fallback__ = "target_heuristic_fallback"
 __pref_key_enable_logging__ = "enable_logging"
 __debug_log_filename__ = "viastitching_debug.log"
 __force_modal_dialog__ = False
+__warn_via_count_threshold__ = 100
+__target_pattern_default__ = "Grid"
+__target_pattern_options__ = ("Grid", "45-degree offset", "Spiral")
 
 GUI_defaults = {"to_units": {0: pcbnew.ToMils, 1: pcbnew.ToMM},
                 "from_units": {0: pcbnew.FromMils, 1: pcbnew.FromMM},
@@ -150,6 +154,31 @@ def _is_pcb_pad(item):
         except Exception:
             pass
     return _item_type_name(item) == "PAD"
+
+
+def _pad_drill_diameter(pad):
+    if pad is None:
+        return 0.0
+
+    try:
+        if hasattr(pad, "GetDrillSize"):
+            drill = pad.GetDrillSize()
+            if hasattr(drill, "x") and hasattr(drill, "y"):
+                return max(abs(float(drill.x)), abs(float(drill.y)))
+            if isinstance(drill, (int, float)):
+                return abs(float(drill))
+    except Exception:
+        pass
+
+    try:
+        if hasattr(pad, "GetDrill"):
+            drill = pad.GetDrill()
+            if isinstance(drill, (int, float)):
+                return abs(float(drill))
+    except Exception:
+        pass
+
+    return 0.0
 
 
 def _is_board_obj(board):
@@ -428,6 +457,8 @@ class ViaStitchingDialog(viastitching_gui):
             self.m_chkDebugLogging.Bind(wx.EVT_CHECKBOX, self.onToggleLogging)
         if hasattr(self, "m_chkMaximizeVias"):
             self.m_chkMaximizeVias.Bind(wx.EVT_CHECKBOX, self.onToggleMaximizeMode)
+        if hasattr(self, "m_chkTargetViaCount"):
+            self.m_chkTargetViaCount.Bind(wx.EVT_CHECKBOX, self.onToggleTargetCountMode)
         if hasattr(self, "m_btnResetPrompts"):
             self.m_btnResetPrompts.Bind(wx.EVT_BUTTON, self.onResetPromptChoices)
         if hasattr(self, "m_previewPanel"):
@@ -456,7 +487,13 @@ class ViaStitchingDialog(viastitching_gui):
         self.net = None
         self.config = {}
         self.include_other_layers = True
+        self.block_footprint_zones = True
+        self.allow_same_net_under_pad = False
+        self.target_via_count_mode = False
+        self.target_via_count = 100
+        self.target_pattern = __target_pattern_default__
         self.target_layers = set()
+        self.active_target_netcode = -1
         self.pruned_stale_vias = 0
         self.owned_via_ids = set()
         self.last_fill_stats = {}
@@ -476,6 +513,8 @@ class ViaStitchingDialog(viastitching_gui):
         self._legacy_commit_available = True
         self._preview_data = None
         self._preview_refresh_timer = None
+        self._syncing_mode_controls = False
+        self._last_noop_popup_shown = False
 
         if hasattr(self, "m_chkDebugLogging"):
             self.m_chkDebugLogging.SetValue(_is_logging_enabled())
@@ -583,12 +622,41 @@ class ViaStitchingDialog(viastitching_gui):
         self.m_chkClearOwn.Hide()
         self.Layout()
         self.m_chkIncludeOtherLayers.SetValue(defaults.get("IncludeOtherLayers", True))
+        if hasattr(self, "m_chkAvoidFootprintZones"):
+            self.m_chkAvoidFootprintZones.SetValue(defaults.get("BlockFootprintZones", True))
+        if hasattr(self, "m_chkAllowSameNetUnderPad"):
+            self.m_chkAllowSameNetUnderPad.SetValue(defaults.get("AllowUnderPadSameNet", False))
+        if hasattr(self, "m_chkTargetViaCount"):
+            self.m_chkTargetViaCount.SetValue(defaults.get("TargetViaCountMode", False))
+        if hasattr(self, "m_txtTargetViaCount"):
+            self.m_txtTargetViaCount.SetValue(str(defaults.get("TargetViaCount", 100)))
+        if hasattr(self, "m_choiceTargetPattern"):
+            pattern = self.NormalizeTargetPattern(defaults.get("TargetPattern", __target_pattern_default__))
+            idx = self.m_choiceTargetPattern.FindString(pattern)
+            if idx == wx.NOT_FOUND:
+                idx = 0
+            self.m_choiceTargetPattern.SetSelection(idx)
         if hasattr(self, "m_chkCenterSegments"):
             self.m_chkCenterSegments.SetValue(defaults.get("CenterSegments", True))
         if hasattr(self, "m_chkMaximizeVias"):
             self.m_chkMaximizeVias.SetValue(defaults.get("MaximizeVias", False))
+        self.SyncPlacementModes()
         self.UpdateMaximizeModeUI()
         self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
+        self.block_footprint_zones = (
+            self.m_chkAvoidFootprintZones.GetValue() if hasattr(self, "m_chkAvoidFootprintZones") else True
+        )
+        self.allow_same_net_under_pad = (
+            self.m_chkAllowSameNetUnderPad.GetValue() if hasattr(self, "m_chkAllowSameNetUnderPad") else False
+        )
+        self.target_via_count_mode = (
+            self.m_chkTargetViaCount.GetValue() if hasattr(self, "m_chkTargetViaCount") else False
+        )
+        try:
+            self.target_via_count = int(float(self.m_txtTargetViaCount.GetValue())) if hasattr(self, "m_txtTargetViaCount") else 100
+        except Exception:
+            self.target_via_count = 100
+        self.target_pattern = self.GetSelectedTargetPattern()
 
         # Get default Vias dimensions
         via_size_default = defaults.get("ViaSize")
@@ -640,12 +708,12 @@ class ViaStitchingDialog(viastitching_gui):
             (self.m_lblVia, _(u"Via outer diameter and drill size.")),
             (self.m_txtViaSize, _(u"Via outer diameter.")),
             (self.m_txtViaDrillSize, _(u"Via drill diameter. Must be smaller than via size.")),
-            (self.m_lblSpacing, _(u"Grid spacing between vias: vertical / horizontal. Ignored when maximize is enabled.")),
-            (self.m_txtVSpacing, _(u"Vertical spacing between via centers. Ignored when maximize is enabled.")),
-            (self.m_txtHSpacing, _(u"Horizontal spacing between via centers. Ignored when maximize is enabled.")),
-            (self.m_lblOffset, _(u"Grid offsets: vertical / horizontal. Ignored when maximize is enabled.")),
-            (self.m_txtVOffset, _(u"Vertical offset of the via grid. Ignored when maximize is enabled.")),
-            (self.m_txtHOffset, _(u"Horizontal offset of the via grid. Ignored when maximize is enabled.")),
+            (self.m_lblSpacing, _(u"Grid center-to-center spacing between via centers: vertical / horizontal. In target mode this is used as a minimum spacing.")),
+            (self.m_txtVSpacing, _(u"Vertical spacing between via centers. In target mode this contributes to minimum spacing.")),
+            (self.m_txtHSpacing, _(u"Horizontal spacing between via centers. In target mode this contributes to minimum spacing.")),
+            (self.m_lblOffset, _(u"Grid offsets: vertical / horizontal. Ignored when maximize or target mode is enabled.")),
+            (self.m_txtVOffset, _(u"Vertical offset of the via grid. Ignored when maximize or target mode is enabled.")),
+            (self.m_txtHOffset, _(u"Horizontal offset of the via grid. Ignored when maximize or target mode is enabled.")),
             (self.m_staticText6, _(u"Extra distance from via edge to zone boundary.")),
             (self.m_txtClearance, _(u"Edge margin: via edge to zone boundary distance.")),
             (self.m_staticTextPadMargin, _(u"Extra distance from vias to pads/tracks/vias/zones during overlap checks.")),
@@ -653,8 +721,14 @@ class ViaStitchingDialog(viastitching_gui):
             (self.m_chkClearOwn, _(u"Internal compatibility option.")),
             (self.m_chkRandomize, _(u"Apply small random jitter to each grid point.")),
             (self.m_chkIncludeOtherLayers, _(u"If enabled, reject vias that collide with copper objects on any copper layer. Disable to only check the selected zone layer.")),
-            (self.m_chkCenterSegments, _(u"If enabled, each reachable segment in a discontinuous row is centered for a neater pattern.")),
-            (self.m_chkMaximizeVias, _(u"Use non-grid dense candidate packing to maximize via count using pad-margin/edge-margin and overlap checks.")),
+            (self.m_chkAvoidFootprintZones, _(u"If enabled, reject vias that collide with copper zones/keepouts defined inside footprints. Disable to allow vias under component bodies while still respecting pads and holes.")),
+            (self.m_chkAllowSameNetUnderPad, _(u"If enabled, allow vias to overlap only SMD pads on the exact same net as the selected zone. Pads with drills/holes are still blocked.")),
+            (self.m_chkTargetViaCount, _(u"Try deterministic pattern placement to reach the requested via count, then fall back to packing only if needed.")),
+            (self.m_txtTargetViaCount, _(u"Target via count (integer > 0). Used only when \"Place target vias\" is enabled.")),
+            (self.m_lblTargetPattern, _(u"Pattern used by deterministic target placement before fallback packing.")),
+            (self.m_choiceTargetPattern, _(u"Deterministic target pattern: Grid, 45-degree offset, or Spiral.")),
+            (self.m_chkCenterSegments, _(u"If enabled, each reachable segment in a discontinuous row is centered for a neater pattern. Used in grid mode only.")),
+            (self.m_chkMaximizeVias, _(u"Use non-grid dense candidate packing to maximize via count using edge/pad margins and overlap checks.")),
             (self.m_chkDebugLogging, _(u"Write detailed runtime logs to viastitching_debug.log in the plugin folder.")),
             (self.m_btnOk, _(u"Apply stitching with current parameters.")),
             (self.m_btnClear, _(u"Remove plugin-owned vias. If matching user vias are found on this zone net, you can choose to remove them too.")),
@@ -667,22 +741,78 @@ class ViaStitchingDialog(viastitching_gui):
             if control is not None:
                 control.SetToolTip(tip)
 
+    def SyncPlacementModes(self, source=None):
+        if self._syncing_mode_controls:
+            return
+        self._syncing_mode_controls = True
+        try:
+            maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+            target_mode = self.m_chkTargetViaCount.GetValue() if hasattr(self, "m_chkTargetViaCount") else False
+            if maximize_vias and target_mode:
+                if source == "maximize" and hasattr(self, "m_chkTargetViaCount"):
+                    self.m_chkTargetViaCount.SetValue(False)
+                elif source == "target" and hasattr(self, "m_chkMaximizeVias"):
+                    self.m_chkMaximizeVias.SetValue(False)
+                else:
+                    if hasattr(self, "m_chkTargetViaCount"):
+                        self.m_chkTargetViaCount.SetValue(False)
+            self.target_via_count_mode = self.m_chkTargetViaCount.GetValue() if hasattr(self, "m_chkTargetViaCount") else False
+        finally:
+            self._syncing_mode_controls = False
+
+    def NormalizeTargetPattern(self, pattern):
+        if isinstance(pattern, str):
+            token = pattern.strip().lower()
+            if token in ("grid",):
+                return "Grid"
+            if token in ("45-degree offset", "45deg offset", "45 degree offset", "staggered", "45"):
+                return "45-degree offset"
+            if token in ("spiral",):
+                return "Spiral"
+        return __target_pattern_default__
+
+    def GetSelectedTargetPattern(self):
+        if hasattr(self, "m_choiceTargetPattern"):
+            try:
+                return self.NormalizeTargetPattern(self.m_choiceTargetPattern.GetStringSelection())
+            except Exception:
+                pass
+        return __target_pattern_default__
+
     def UpdateMaximizeModeUI(self):
         maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
-        enable_grid_controls = not maximize_vias
-        controls = (
+        target_mode = self.m_chkTargetViaCount.GetValue() if hasattr(self, "m_chkTargetViaCount") else False
+        enable_spacing_controls = not maximize_vias
+        enable_offset_controls = (not maximize_vias) and (not target_mode)
+        enable_grid_only = (not maximize_vias) and (not target_mode)
+        spacing_controls = (
             self.m_lblSpacing,
             self.m_txtVSpacing,
             self.m_txtHSpacing,
+            self.m_lblUnit2,
+        )
+        for control in spacing_controls:
+            if control is not None:
+                control.Enable(enable_spacing_controls)
+        offset_controls = (
             self.m_lblOffset,
             self.m_txtVOffset,
             self.m_txtHOffset,
-            self.m_lblUnit2,
             self.m_lblUnit3,
         )
-        for control in controls:
+        for control in offset_controls:
             if control is not None:
-                control.Enable(enable_grid_controls)
+                control.Enable(enable_offset_controls)
+        if hasattr(self, "m_chkCenterSegments"):
+            self.m_chkCenterSegments.Enable(enable_grid_only)
+        if hasattr(self, "m_chkRandomize"):
+            self.m_chkRandomize.Enable(enable_grid_only)
+        if hasattr(self, "m_txtTargetViaCount"):
+            self.m_txtTargetViaCount.Enable(target_mode)
+        if hasattr(self, "m_lblTargetPattern"):
+            self.m_lblTargetPattern.Enable(target_mode)
+        if hasattr(self, "m_choiceTargetPattern"):
+            self.m_choiceTargetPattern.Enable(target_mode)
 
     def BindPreviewInputEvents(self):
         text_controls = (
@@ -694,6 +824,7 @@ class ViaStitchingDialog(viastitching_gui):
             self.m_txtHOffset,
             self.m_txtClearance,
             self.m_txtPadMargin,
+            self.m_txtTargetViaCount,
         )
         for control in text_controls:
             if control is not None:
@@ -702,12 +833,18 @@ class ViaStitchingDialog(viastitching_gui):
         checkbox_controls = (
             self.m_chkRandomize,
             self.m_chkIncludeOtherLayers,
+            self.m_chkAvoidFootprintZones,
+            self.m_chkAllowSameNetUnderPad,
+            self.m_chkTargetViaCount,
             self.m_chkCenterSegments,
             self.m_chkMaximizeVias,
         )
         for control in checkbox_controls:
             if control is not None:
                 control.Bind(wx.EVT_CHECKBOX, self.onPreviewInputChanged)
+
+        if hasattr(self, "m_choiceTargetPattern") and self.m_choiceTargetPattern is not None:
+            self.m_choiceTargetPattern.Bind(wx.EVT_CHOICE, self.onPreviewInputChanged)
 
     def _parse_inputs_for_preview(self):
         try:
@@ -720,6 +857,9 @@ class ViaStitchingDialog(viastitching_gui):
                 "offset_y": self.FromUserUnit(float(self.m_txtVOffset.GetValue())),
                 "edge_margin": self.FromUserUnit(float(self.m_txtClearance.GetValue())),
                 "pad_margin": self.FromUserUnit(float(self.m_txtPadMargin.GetValue())),
+                "target_mode": self.m_chkTargetViaCount.GetValue() if hasattr(self, "m_chkTargetViaCount") else False,
+                "target_count": int(float(self.m_txtTargetViaCount.GetValue())) if hasattr(self, "m_txtTargetViaCount") else 0,
+                "target_pattern": self.GetSelectedTargetPattern(),
             }
         except Exception:
             return None
@@ -729,7 +869,11 @@ class ViaStitchingDialog(viastitching_gui):
         if data["edge_margin"] < 0 or data["pad_margin"] < 0:
             return None
         maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+        if maximize_vias and data["target_mode"]:
+            return None
         if (not maximize_vias) and (data["step_x"] <= 0 or data["step_y"] <= 0):
+            return None
+        if data["target_mode"] and data["target_count"] <= 0:
             return None
         return data
 
@@ -769,30 +913,48 @@ class ViaStitchingDialog(viastitching_gui):
                 return
 
             # Rebuild overlap cache used by CheckOverlap() for current selection/settings.
+            self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
+            self.block_footprint_zones = (
+                self.m_chkAvoidFootprintZones.GetValue() if hasattr(self, "m_chkAvoidFootprintZones") else True
+            )
+            self.allow_same_net_under_pad = (
+                self.m_chkAllowSameNetUnderPad.GetValue() if hasattr(self, "m_chkAllowSameNetUnderPad") else False
+            )
             self.GetOverlappingItems()
 
             maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+            target_mode = bool(inputs.get("target_mode", False))
+            target_count = int(inputs.get("target_count", 0) or 0)
+            target_pattern = self.NormalizeTargetPattern(inputs.get("target_pattern", __target_pattern_default__))
             required_edge_margin = (inputs["viasize"] / 2.0) + inputs["edge_margin"]
-            via_clearance = max(1, int(round(inputs["viasize"] + (2 * inputs["pad_margin"]))))
+            via_clearance = max(1, int(round(inputs["viasize"])))
+            spacing_min = via_clearance
+            if target_mode:
+                spacing_min = max(spacing_min, int(round(min(inputs["step_x"], inputs["step_y"]))))
+            spacing_min_sq = float(spacing_min * spacing_min)
 
             if maximize_vias:
                 sample_x = max(1, int(round(via_clearance / 2.0)))
                 sample_y = max(1, int(round(via_clearance / 2.0)))
                 x_start_base = left
                 y_start = top
-                staggered = True
+            elif target_mode:
+                sample_x = max(1, int(round(inputs["step_x"])))
+                sample_y = max(1, int(round(inputs["step_y"])))
+                x_start_base = left + ((int(inputs["offset_x"]) - left) % sample_x)
+                y_start = top + ((int(inputs["offset_y"]) - top) % sample_y)
             else:
                 sample_x = max(1, int(inputs["step_x"]))
                 sample_y = max(1, int(inputs["step_y"]))
                 x_start_base = left + ((int(inputs["offset_x"]) - left) % sample_x)
                 y_start = top + ((int(inputs["offset_y"]) - top) % sample_y)
-                staggered = False
 
             max_preview_candidates = 2600
             width = max(1, right - left + 1)
             height = max(1, bottom - top + 1)
             estimate = ((width // max(1, sample_x)) + 1) * ((height // max(1, sample_y)) + 1)
-            if estimate > max_preview_candidates:
+            use_spiral = target_mode and (target_pattern == "Spiral")
+            if (not use_spiral) and estimate > max_preview_candidates:
                 scale = math.sqrt(float(estimate) / float(max_preview_candidates))
                 sample_x = max(1, int(math.ceil(sample_x * scale)))
                 sample_y = max(1, int(math.ceil(sample_y * scale)))
@@ -811,54 +973,215 @@ class ViaStitchingDialog(viastitching_gui):
                 "rejected_overlap": 0,
             }
             preview_netcode = self.board.GetNetcodeFromNetname(self.net) if self.net else -1
+            self.active_target_netcode = int(preview_netcode)
             max_points_per_bucket = 1400
+            accepted_bins = {}
+            accepted_cell = max(1, spacing_min)
 
-            row_index = 0
-            yv = y_start
-            while yv <= bottom:
-                x_start = x_start_base
-                if staggered and (row_index % 2 == 1):
-                    x_start += sample_x / 2.0
-                xv = x_start
-                while xv <= right:
-                    counts["tested"] += 1
-                    p = self.ToBoardPoint(xv, yv)
-                    if not self.IsPointInsideZoneWithMargin(p, required_edge_margin):
-                        counts["rejected_edge"] += 1
-                        if len(rejected_edge) < max_points_per_bucket:
-                            rejected_edge.append((int(round(xv)), int(round(yv))))
+            def _preview_conflicts_with_accepted(px, py):
+                gx = int(px) // accepted_cell
+                gy = int(py) // accepted_cell
+                for nx in range(gx - 1, gx + 2):
+                    for ny in range(gy - 1, gy + 2):
+                        for ox, oy in accepted_bins.get((nx, ny), ()):
+                            dx = float(px - ox)
+                            dy = float(py - oy)
+                            if (dx * dx + dy * dy) < spacing_min_sq:
+                                return True
+                return False
+
+            def _preview_remember_accepted(px, py):
+                key = (int(px) // accepted_cell, int(py) // accepted_cell)
+                accepted_bins.setdefault(key, []).append((int(px), int(py)))
+
+            def _preview_select_spread_points(points, wanted_count):
+                if wanted_count <= 0 or len(points) <= wanted_count:
+                    return list(points)
+                if not points:
+                    return []
+
+                cx = 0.5 * float(left + right)
+                cy = 0.5 * float(top + bottom)
+                seed_index = min(
+                    range(len(points)),
+                    key=lambda i: (
+                        (float(points[i][0]) - cx) ** 2 + (float(points[i][1]) - cy) ** 2,
+                        float(points[i][1]),
+                        float(points[i][0]),
+                    ),
+                )
+
+                chosen = [seed_index]
+                chosen_set = {seed_index}
+                min_dist_sq = [0.0] * len(points)
+                sx, sy = points[seed_index]
+                for i, (px, py) in enumerate(points):
+                    dx = float(px - sx)
+                    dy = float(py - sy)
+                    min_dist_sq[i] = (dx * dx) + (dy * dy)
+
+                while len(chosen) < wanted_count:
+                    best_idx = None
+                    best_score = -1.0
+                    best_y = 0.0
+                    best_x = 0.0
+                    for i, (px, py) in enumerate(points):
+                        if i in chosen_set:
+                            continue
+                        score = min_dist_sq[i]
+                        if (
+                            best_idx is None
+                            or score > best_score
+                            or (score == best_score and (float(py) < best_y or (float(py) == best_y and float(px) < best_x)))
+                        ):
+                            best_idx = i
+                            best_score = score
+                            best_y = float(py)
+                            best_x = float(px)
+                    if best_idx is None:
+                        break
+
+                    chosen.append(best_idx)
+                    chosen_set.add(best_idx)
+                    bx, by = points[best_idx]
+                    for i, (px, py) in enumerate(points):
+                        if i in chosen_set:
+                            continue
+                        dx = float(px - bx)
+                        dy = float(py - by)
+                        d2 = (dx * dx) + (dy * dy)
+                        if d2 < min_dist_sq[i]:
+                            min_dist_sq[i] = d2
+
+                return [points[i] for i in chosen]
+
+            def _iter_spiral_points(limit_points):
+                if limit_points <= 0:
+                    return
+                center_x = 0.5 * float(left + right)
+                center_y = 0.5 * float(top + bottom)
+                origin_x = x_start_base
+                origin_y = y_start
+                kx0 = int(round((center_x - origin_x) / float(sample_x)))
+                ky0 = int(round((center_y - origin_y) / float(sample_y)))
+                grid_cx = origin_x + (kx0 * sample_x)
+                grid_cy = origin_y + (ky0 * sample_y)
+
+                kx_min = int(math.ceil((left - grid_cx) / float(sample_x)))
+                kx_max = int(math.floor((right - grid_cx) / float(sample_x)))
+                ky_min = int(math.ceil((top - grid_cy) / float(sample_y)))
+                ky_max = int(math.floor((bottom - grid_cy) / float(sample_y)))
+                if kx_min > kx_max or ky_min > ky_max:
+                    return
+
+                yielded = 0
+                radius = 0
+                while yielded < limit_points:
+                    ring_values = []
+                    if radius == 0:
+                        ring_values.append((0, 0))
+                    else:
+                        for dx in range(-radius, radius + 1):
+                            ring_values.append((dx, -radius))
+                        for dy in range(-radius + 1, radius + 1):
+                            ring_values.append((radius, dy))
+                        for dx in range(radius - 1, -radius - 1, -1):
+                            ring_values.append((dx, radius))
+                        for dy in range(radius - 1, -radius, -1):
+                            ring_values.append((-radius, dy))
+
+                    emitted_this_ring = 0
+                    for dx, dy in ring_values:
+                        gx = dx
+                        gy = dy
+                        if gx < kx_min or gx > kx_max or gy < ky_min or gy > ky_max:
+                            continue
+                        xv = grid_cx + (gx * sample_x)
+                        yv = grid_cy + (gy * sample_y)
+                        if xv < left or xv > right or yv < top or yv > bottom:
+                            continue
+                        yield (xv, yv)
+                        yielded += 1
+                        emitted_this_ring += 1
+                        if yielded >= limit_points:
+                            return
+                    if emitted_this_ring == 0 and radius > max(abs(kx_min), abs(kx_max), abs(ky_min), abs(ky_max)):
+                        return
+                    radius += 1
+
+            def _iter_preview_candidates():
+                if use_spiral:
+                    for point in _iter_spiral_points(max_preview_candidates):
+                        yield point
+                    return
+
+                staggered = maximize_vias or (target_mode and target_pattern == "45-degree offset")
+                row_index = 0
+                yv = y_start
+                while yv <= bottom:
+                    x_start = x_start_base
+                    if staggered and (row_index % 2 == 1):
+                        x_start += sample_x / 2.0
+                    xv = x_start
+                    while xv <= right:
+                        yield (xv, yv)
                         xv += sample_x
-                        continue
+                    yv += sample_y
+                    row_index += 1
 
-                    counts["inside"] += 1
-                    probe = pcbnew.PCB_VIA(self.board)
-                    probe.SetPosition(p)
-                    probe.SetNetCode(preview_netcode)
-                    probe.SetDrill(inputs["drillsize"] + 2 * inputs["pad_margin"])
-                    probe.SetWidth(inputs["viasize"] + 2 * inputs["pad_margin"])
-                    if self.CheckOverlap(probe):
-                        counts["rejected_overlap"] += 1
-                        if len(rejected_overlap) < max_points_per_bucket:
-                            rejected_overlap.append((int(round(xv)), int(round(yv))))
-                        xv += sample_x
-                        continue
+            for xv, yv in _iter_preview_candidates():
+                counts["tested"] += 1
+                p = self.ToBoardPoint(xv, yv)
+                if not self.IsPointInsideZoneWithMargin(p, required_edge_margin):
+                    counts["rejected_edge"] += 1
+                    if len(rejected_edge) < max_points_per_bucket:
+                        rejected_edge.append((int(round(xv)), int(round(yv))))
+                    continue
 
-                    counts["accepted"] += 1
-                    if len(accepted) < max_points_per_bucket:
-                        accepted.append((int(round(xv)), int(round(yv))))
-                    xv += sample_x
-                yv += sample_y
-                row_index += 1
+                counts["inside"] += 1
+                px = int(round(xv))
+                py = int(round(yv))
+                if _preview_conflicts_with_accepted(px, py):
+                    counts["rejected_overlap"] += 1
+                    if len(rejected_overlap) < max_points_per_bucket:
+                        rejected_overlap.append((px, py))
+                    continue
 
-            mode_label = "MAXIMIZE" if maximize_vias else "GRID"
+                probe = pcbnew.PCB_VIA(self.board)
+                probe.SetPosition(p)
+                probe.SetNetCode(preview_netcode)
+                probe.SetDrill(inputs["drillsize"])
+                probe.SetWidth(inputs["viasize"])
+                if self.CheckOverlap(probe):
+                    counts["rejected_overlap"] += 1
+                    if len(rejected_overlap) < max_points_per_bucket:
+                        rejected_overlap.append((int(round(xv)), int(round(yv))))
+                    continue
+
+                counts["accepted"] += 1
+                if len(accepted) < max_points_per_bucket:
+                    accepted.append((px, py))
+                _preview_remember_accepted(px, py)
+
+            mode_label = "MAXIMIZE" if maximize_vias else ("TARGET" if target_mode else "GRID")
+            if target_mode:
+                mode_label = f"{mode_label} [{target_pattern}]"
+            accepted_display = accepted
+            if target_mode and target_count > 0 and len(accepted) > target_count:
+                accepted_display = _preview_select_spread_points(accepted, target_count)
+            target_effective = len(accepted_display) if target_mode and target_count > 0 else counts["accepted"]
             self._preview_data = {
                 "bounds": (left, top, right, bottom),
-                "accepted": accepted,
+                "accepted": accepted_display,
                 "rejected_edge": rejected_edge,
                 "rejected_overlap": rejected_overlap,
                 "counts": counts,
                 "mode": mode_label,
                 "sample": (sample_x, sample_y),
+                "target_mode": target_mode,
+                "target_count": target_count,
+                "target_effective": target_effective,
+                "target_pattern": target_pattern,
             }
             self.m_previewPanel.Refresh()
         except Exception as e:
@@ -940,10 +1263,20 @@ class ViaStitchingDialog(viastitching_gui):
             f"{data['mode']}  tested:{counts['tested']}  "
             f"ok:{counts['accepted']}  overlap:{counts['rejected_overlap']}  edge:{counts['rejected_edge']}"
         )
+        if data.get("target_mode"):
+            summary += f"  target:{data.get('target_count', 0)}  place:{data.get('target_effective', 0)}"
         dc.SetTextForeground(wx.Colour(235, 235, 235))
         dc.DrawText(summary, 8, 8)
 
     def onToggleMaximizeMode(self, event):
+        self.SyncPlacementModes(source="maximize")
+        self.UpdateMaximizeModeUI()
+        self.QueuePreviewRefresh()
+        if event is not None:
+            event.Skip()
+
+    def onToggleTargetCountMode(self, event):
+        self.SyncPlacementModes(source="target")
         self.UpdateMaximizeModeUI()
         self.QueuePreviewRefresh()
         if event is not None:
@@ -953,6 +1286,97 @@ class ViaStitchingDialog(viastitching_gui):
         if hasattr(self.board, "Groups"):
             return list(self.board.Groups())
         return []
+
+    def GetGroupMembers(self, group):
+        if group is None:
+            return []
+        if hasattr(group, "GetItems"):
+            try:
+                return list(group.GetItems())
+            except Exception:
+                pass
+        if hasattr(group, "GetMembers"):
+            try:
+                return list(group.GetMembers())
+            except Exception:
+                pass
+        return []
+
+    def RemoveBoardGroup(self, group, commit=None):
+        if group is None:
+            return False
+        try:
+            self.CommitRemove(commit, group)
+            self.board.Remove(group)
+            return True
+        except Exception as e:
+            _debug_log(
+                "RemoveBoardGroup: failed to remove group "
+                f"group={_safe_obj_desc(group)} error={type(e).__name__}: {e}"
+            )
+            return False
+
+    def NormalizePluginGroups(self, commit=None):
+        groups = self.GetGroups()
+        if not groups:
+            return
+
+        duplicate_map = {}
+        unnamed_groups = []
+        for group in groups:
+            name = self.GetGroupNameSafe(group)
+            if not name:
+                unnamed_groups.append(group)
+                continue
+            if name.startswith(__viagroupname_base__):
+                duplicate_map.setdefault(name, []).append(group)
+
+        removed_unnamed = 0
+        for group in unnamed_groups:
+            members = self.GetGroupMembers(group)
+            if members:
+                continue
+            if self.RemoveBoardGroup(group, commit=commit):
+                removed_unnamed += 1
+
+        removed_duplicates = 0
+        for name, same_name_groups in duplicate_map.items():
+            if len(same_name_groups) <= 1:
+                continue
+
+            primary = same_name_groups[0]
+            primary_member_ids = set()
+            for item in self.GetGroupMembers(primary):
+                uid = _item_uuid(item)
+                if uid:
+                    primary_member_ids.add(uid)
+
+            for duplicate in same_name_groups[1:]:
+                for item in self.GetGroupMembers(duplicate):
+                    uid = _item_uuid(item)
+                    if uid and uid in primary_member_ids:
+                        continue
+                    try:
+                        self.CommitModify(commit, primary)
+                        primary.AddItem(item)
+                        if uid:
+                            primary_member_ids.add(uid)
+                    except Exception as e:
+                        _debug_log(
+                            "NormalizePluginGroups: failed to move member from duplicate group "
+                            f"name={name} error={type(e).__name__}: {e}"
+                        )
+                if self.RemoveBoardGroup(duplicate, commit=commit):
+                    removed_duplicates += 1
+
+            if self.viagroupname and name == self.viagroupname:
+                self.pcb_group = primary
+
+        if removed_unnamed or removed_duplicates:
+            _debug_log(
+                "NormalizePluginGroups: "
+                f"removed_unnamed={removed_unnamed} removed_duplicate_groups={removed_duplicates}"
+            )
 
     def NewBoardCommit(self):
         self.last_commit_error = ""
@@ -1175,7 +1599,7 @@ class ViaStitchingDialog(viastitching_gui):
                     f"error={type(e).__name__}: {e}"
                 )
 
-        if not detached and hasattr(item, "SetParentGroup"):
+        if not detached and not hasattr(parent, "RemoveItem") and hasattr(item, "SetParentGroup"):
             try:
                 item.SetParentGroup(None)
                 detached = True
@@ -1468,6 +1892,44 @@ class ViaStitchingDialog(viastitching_gui):
             self, title, message, __pref_key_replace_user_vias__
         )
 
+    def PromptLargePlacementWarning(self, predicted_count, maximize_mode=False, mode_name=None):
+        if predicted_count < __warn_via_count_threshold__:
+            return True
+        if mode_name:
+            mode_label = str(mode_name)
+        else:
+            mode_label = _(u"maximize") if maximize_mode else _(u"grid")
+        title = _(u"Large Via Placement")
+        message = _(
+            u"This run is about to place approximately %d vias in %s mode.\n\n"
+            u"Large placements can take longer.\n"
+            u"Continue?"
+        ) % (int(predicted_count), mode_label)
+        dlg = wx.MessageDialog(
+            self,
+            message,
+            title,
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING
+        )
+        if hasattr(dlg, "SetYesNoLabels"):
+            dlg.SetYesNoLabels(_(u"Proceed"), _(u"Cancel"))
+        result = (dlg.ShowModal() == wx.ID_YES)
+        dlg.Destroy()
+        return result
+
+    def PromptTargetHeuristicFallback(self, pattern_name, target_requested, deterministic_available):
+        title = _(u"Deterministic Target Missed")
+        message = _(
+            u"Deterministic %s pattern could place %d of %d target vias.\n\n"
+            u"Try heuristic fallback to improve count?"
+        ) % (str(pattern_name), int(deterministic_available), int(target_requested))
+        return _prompt_yes_no_with_memory(
+            self,
+            title,
+            message,
+            __pref_key_target_heuristic_fallback__,
+        )
+
     def SafeRemoveVia(self, via):
         if via is None:
             return
@@ -1544,9 +2006,12 @@ class ViaStitchingDialog(viastitching_gui):
         return None
 
     def RemoveCurrentStitchGroup(self, commit=None, push_commit=True):
-        group = self.pcb_group
-        if group is None and self.viagroupname:
-            group = self.FindGroupByName(self.viagroupname)
+        self.NormalizePluginGroups(commit=commit)
+        group = self.FindGroupByName(self.viagroupname) if self.viagroupname else None
+        if group is None:
+            parent_name = self.GetGroupNameSafe(self.pcb_group)
+            if parent_name.startswith(__viagroupname_base__):
+                group = self.pcb_group
         if group is None:
             _debug_log("RemoveCurrentStitchGroup: no group found")
             return False
@@ -1557,8 +2022,13 @@ class ViaStitchingDialog(viastitching_gui):
             if self.area is not None:
                 self.DetachItemFromGroup(self.area, commit=commit, expected_group=group)
 
-            self.CommitRemove(commit, group)
-            self.board.Remove(group)
+            if not self.RemoveBoardGroup(group, commit=commit):
+                _debug_log(
+                    "RemoveCurrentStitchGroup: failed to remove group from board "
+                    f"group={self.GetGroupNameSafe(group) or '<unnamed>'}"
+                )
+                self.ClearEditorSelection()
+                return False
             if push_commit:
                 self.CommitPush(commit, "ViaStitching: Remove Group")
             if group == self.pcb_group:
@@ -1796,14 +2266,24 @@ class ViaStitchingDialog(viastitching_gui):
                 "offset_y": self.FromUserUnit(float(self.m_txtVOffset.GetValue())),
                 "edge_margin": self.FromUserUnit(float(self.m_txtClearance.GetValue())),
                 "pad_margin": self.FromUserUnit(float(self.m_txtPadMargin.GetValue())),
+                "target_mode": self.m_chkTargetViaCount.GetValue() if hasattr(self, "m_chkTargetViaCount") else False,
+                "target_count": int(float(self.m_txtTargetViaCount.GetValue())) if hasattr(self, "m_txtTargetViaCount") else 0,
+                "target_pattern": self.GetSelectedTargetPattern(),
             }
         except ValueError:
             _show_error_with_log(self, _(u"ViaStitching"), _(u"Please enter valid numeric values."), context="validate_numeric")
             return None
 
         maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
+        target_mode = inputs["target_mode"]
+        if maximize_vias and target_mode:
+            _show_error_with_log(self, _(u"ViaStitching"), _(u"Target mode and maximize mode cannot be enabled at the same time."), context="validate_mode_conflict")
+            return None
         if (not maximize_vias) and (inputs["step_x"] <= 0 or inputs["step_y"] <= 0):
             _show_error_with_log(self, _(u"ViaStitching"), _(u"Spacing values must be greater than 0."), context="validate_spacing")
+            return None
+        if target_mode and inputs["target_count"] <= 0:
+            _show_error_with_log(self, _(u"ViaStitching"), _(u"Target via count must be a positive integer."), context="validate_target_count")
             return None
         if inputs["viasize"] <= 0 or inputs["drillsize"] <= 0:
             _show_error_with_log(self, _(u"ViaStitching"), _(u"Via size and drill must be greater than 0."), context="validate_via_positive")
@@ -1834,6 +2314,11 @@ class ViaStitchingDialog(viastitching_gui):
             "Randomize": self.m_chkRandomize.GetValue(),
             "ClearOwn": self.m_chkClearOwn.GetValue(),
             "IncludeOtherLayers": self.m_chkIncludeOtherLayers.GetValue(),
+            "BlockFootprintZones": self.m_chkAvoidFootprintZones.GetValue() if hasattr(self, "m_chkAvoidFootprintZones") else True,
+            "AllowUnderPadSameNet": self.m_chkAllowSameNetUnderPad.GetValue() if hasattr(self, "m_chkAllowSameNetUnderPad") else False,
+            "TargetViaCountMode": self.m_chkTargetViaCount.GetValue() if hasattr(self, "m_chkTargetViaCount") else False,
+            "TargetViaCount": self.m_txtTargetViaCount.GetValue() if hasattr(self, "m_txtTargetViaCount") else "100",
+            "TargetPattern": self.GetSelectedTargetPattern(),
             "CenterSegments": self.m_chkCenterSegments.GetValue() if hasattr(self, "m_chkCenterSegments") else True,
             "MaximizeVias": self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False,
             "ZoneSignature": _zone_signature(self.area),
@@ -1952,9 +2437,8 @@ class ViaStitchingDialog(viastitching_gui):
         for item in modules:
             if item.GetBoundingBox().Intersects(area_bbox):
                 for pad in item.Pads():
-                    if self.IsOnTargetLayers(pad):
-                        self.overlappings.append(pad)
-                if hasattr(item, "Zones"):
+                    self.overlappings.append(pad)
+                if self.block_footprint_zones and hasattr(item, "Zones"):
                     for zone in item.Zones():
                         zone_net = _item_netname(zone)
                         if self.IsOnTargetLayers(zone) and zone_net != self.net:
@@ -2210,7 +2694,7 @@ class ViaStitchingDialog(viastitching_gui):
         """
         return self.IsPointInsideZoneWithMargin(via.GetPosition(), edge_margin)
 
-    def CheckOverlap(self, via):
+    def CheckOverlap(self, via, reason_counts=None):
         """Check if via overlaps or interfere with other items on the board.
 
         Parameters:
@@ -2220,39 +2704,81 @@ class ViaStitchingDialog(viastitching_gui):
             bool: True if via overlaps with an item, False otherwise.
         """
 
+        def _count_reason(reason_key):
+            if reason_counts is None:
+                return
+            reason_counts[reason_key] = int(reason_counts.get(reason_key, 0)) + 1
+
+        via_bbox = via.GetBoundingBox()
+        pad_probe_bbox = via_bbox
+        pad_margin_nm = max(0, int(self.pad_margin))
+        if pad_margin_nm > 0:
+            try:
+                pad_probe = pcbnew.PCB_VIA(self.board)
+                pad_probe.SetPosition(via.GetPosition())
+                pad_probe.SetNetCode(via.GetNetCode())
+                pad_probe.SetDrill(int(via.GetDrill()) + (2 * pad_margin_nm))
+                pad_probe.SetWidth(int(via.GetWidth()) + (2 * pad_margin_nm))
+                pad_probe_bbox = pad_probe.GetBoundingBox()
+            except Exception:
+                pad_probe_bbox = via_bbox
+
         for item in self.overlappings:
-            if not self.IsOnTargetLayers(item):
+            is_pad = _is_pcb_pad(item)
+            if (not is_pad) and (not self.IsOnTargetLayers(item)):
                 continue
 
-            if _is_pcb_pad(item):
-                if item.GetBoundingBox().Intersects(via.GetBoundingBox()):
+            if is_pad:
+                if item.GetBoundingBox().Intersects(pad_probe_bbox):
+                    if self.allow_same_net_under_pad and _pad_drill_diameter(item) <= 0.0:
+                        same_net = False
+                        try:
+                            pad_netcode = int(item.GetNetCode())
+                            via_netcode = int(via.GetNetCode())
+                            same_net = (pad_netcode >= 0 and via_netcode >= 0 and pad_netcode == via_netcode)
+                            if same_net and self.active_target_netcode >= 0:
+                                same_net = (pad_netcode == int(self.active_target_netcode))
+                        except Exception:
+                            same_net = False
+                        if same_net:
+                            continue
+                    _count_reason("pad")
                     return True
             elif _is_pcb_via(item):
-                # For vias, enforce radial copper-edge spacing using center distance.
-                # Candidate via is already inflated by pad_margin during overlap check.
+                # For vias, enforce physical copper-edge spacing using via diameters.
                 try:
                     center = via.GetPosition()
                     other = item.GetPosition()
                     dx = float(center.x - other.x)
                     dy = float(center.y - other.y)
                     min_dist = (float(via.GetWidth()) + float(item.GetWidth())) / 2.0
-                    if (dx * dx + dy * dy) <= (min_dist * min_dist):
+                    if (dx * dx + dy * dy) < (min_dist * min_dist):
+                        _count_reason("via")
                         return True
                     continue
                 except Exception:
                     pass
                 if item.GetBoundingBox().Intersects(via.GetBoundingBox()):
+                    _count_reason("via_bbox")
                     return True
             elif type(item).__name__ in ['ZONE', 'FP_ZONE', 'PCB_ZONE', 'ZONE_CONTAINER', 'ZONE_PROXY']:
-                if item.GetBoundingBox().Intersects(via.GetBoundingBox()):
+                if item.GetBoundingBox().Intersects(via_bbox):
+                    _count_reason("zone")
                     return True
             elif type(item).__name__ in ['PCB_TRACK', 'PCB_ARC']:
-                if item.GetBoundingBox().Intersects(via.GetBoundingBox()):
+                try:
+                    if int(item.GetNetCode()) == int(via.GetNetCode()):
+                        continue
+                except Exception:
+                    pass
+                if item.GetBoundingBox().Intersects(via_bbox):
                     if type(item).__name__ == 'PCB_ARC':
+                        _count_reason("arc")
                         return True
                     width = item.GetWidth()
                     dist, _ = pnt2line(via.GetPosition(), item.GetStart(), item.GetEnd())
                     if dist <= (width / 2) + (via.GetWidth() / 2):
+                        _count_reason("track")
                         return True
         return False
 
@@ -2307,6 +2833,7 @@ class ViaStitchingDialog(viastitching_gui):
         """Fills selected area with vias."""
 
         _debug_log("FillupArea: start")
+        self._last_noop_popup_shown = False
         inputs = self.ParseAndValidateInputs()
         if inputs is None:
             _debug_log("FillupArea: aborted due to invalid inputs")
@@ -2322,6 +2849,12 @@ class ViaStitchingDialog(viastitching_gui):
         pad_margin = inputs["pad_margin"]
         self.randomize = self.m_chkRandomize.GetValue()
         self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
+        self.block_footprint_zones = (
+            self.m_chkAvoidFootprintZones.GetValue() if hasattr(self, "m_chkAvoidFootprintZones") else True
+        )
+        self.allow_same_net_under_pad = (
+            self.m_chkAllowSameNetUnderPad.GetValue() if hasattr(self, "m_chkAllowSameNetUnderPad") else False
+        )
         self.pad_margin = pad_margin
         bbox = self.area.GetBoundingBox()
         top = bbox.GetTop()
@@ -2336,19 +2869,39 @@ class ViaStitchingDialog(viastitching_gui):
         if netcode < 0:
             _show_error_with_log(self, _(u"ViaStitching"), _(u"Selected net is not valid on this board."), context="fill_invalid_net")
             return False
-        if commit is None:
-            commit = self.RequireUndoBackend("FillupArea", show_popup=show_message)
+        self.active_target_netcode = int(netcode)
         viacount = 0
         candidates = 0
         inside_zone = 0
         rejected_overlap = 0
         rejected_edge_margin = 0
+        overlap_reason_counts = {}
 
         center_segments = self.m_chkCenterSegments.GetValue() if hasattr(self, "m_chkCenterSegments") else True
         maximize_vias = self.m_chkMaximizeVias.GetValue() if hasattr(self, "m_chkMaximizeVias") else False
-        randomize_points = self.randomize and not maximize_vias
+        target_mode = bool(inputs.get("target_mode", False))
+        target_count = int(inputs.get("target_count", 0) or 0)
+        target_pattern = self.NormalizeTargetPattern(inputs.get("target_pattern", __target_pattern_default__))
+        self.target_via_count_mode = target_mode
+        self.target_via_count = target_count
+        self.target_pattern = target_pattern
+        randomize_points = self.randomize and (not maximize_vias) and (not target_mode)
         required_edge_margin = (viasize / 2) + edge_margin
         probe_step = max(1, int(step_x / 10))
+        via_clearance = max(1, int(round(viasize)))
+        via_clearance_sq = float(via_clearance * via_clearance)
+        _debug_log(
+            "FillupArea context: "
+            f"zone={self.area.GetZoneName() if self.area is not None else '<none>'} "
+            f"net={netname} bbox=({left},{top})-({right},{bottom}) "
+            f"step=({step_x},{step_y}) offset=({offset_x},{offset_y}) "
+            f"via={viasize} drill={drillsize} edge_margin={edge_margin} pad_margin={pad_margin} "
+            f"required_edge_margin={required_edge_margin} include_other_layers={self.include_other_layers} "
+            f"block_footprint_zones={self.block_footprint_zones} "
+            f"allow_same_net_under_pad={self.allow_same_net_under_pad}"
+        )
+        if commit is None:
+            commit = self.RequireUndoBackend("FillupArea", show_popup=show_message)
 
         def _phase_offsets(step, base, samples):
             if step <= 0:
@@ -2426,6 +2979,24 @@ class ViaStitchingDialog(viastitching_gui):
             phase_inside = 0
             phase_rejected_overlap = 0
             phase_rejected_edge = 0
+            accepted_bins = {}
+            cell_size = max(1, via_clearance)
+
+            def _conflicts_with_accepted(px, py):
+                gx = int(px) // cell_size
+                gy = int(py) // cell_size
+                for nx in range(gx - 1, gx + 2):
+                    for ny in range(gy - 1, gy + 2):
+                        for ox, oy in accepted_bins.get((nx, ny), ()):
+                            dx = float(px - ox)
+                            dy = float(py - oy)
+                            if (dx * dx + dy * dy) < via_clearance_sq:
+                                return True
+                return False
+
+            def _remember_accepted(px, py):
+                key = (int(px) // cell_size, int(py) // cell_size)
+                accepted_bins.setdefault(key, []).append((int(px), int(py)))
 
             yv = top + ((phase_y - top) % step_y)
             while yv <= bottom:
@@ -2444,6 +3015,12 @@ class ViaStitchingDialog(viastitching_gui):
                         continue
 
                     phase_inside += 1
+                    px = int(round(xp))
+                    py = int(round(yp))
+                    if _conflicts_with_accepted(px, py):
+                        phase_rejected_overlap += 1
+                        continue
+
                     via = pcbnew.PCB_VIA(self.board)
                     via.SetPosition(p)
                     if hasattr(via, "SetViaType") and hasattr(pcbnew, "VIATYPE_THROUGH"):
@@ -2456,15 +3033,16 @@ class ViaStitchingDialog(viastitching_gui):
                     elif hasattr(via, "SetLayerSet"):
                         via.SetLayerSet(layer_set)
                     via.SetNetCode(netcode)
-                    via.SetDrill(drillsize + 2 * pad_margin)
-                    via.SetWidth(viasize + 2 * pad_margin)
+                    via.SetDrill(drillsize)
+                    via.SetWidth(viasize)
 
-                    if self.CheckOverlap(via):
+                    if self.CheckOverlap(via, reason_counts=overlap_reason_counts):
                         phase_rejected_overlap += 1
                         continue
 
                     if not apply_changes:
                         phase_viacount += 1
+                        _remember_accepted(px, py)
                         continue
 
                     if self.pcb_group is None:
@@ -2473,6 +3051,10 @@ class ViaStitchingDialog(viastitching_gui):
                     via.SetWidth(viasize)
                     via.SetDrill(drillsize)
                     self.board.Add(via)
+                    try:
+                        via.SetNetCode(netcode)
+                    except Exception:
+                        pass
                     self.CommitAdd(commit, via)
                     if self.pcb_group is not None:
                         if commit is not None:
@@ -2485,6 +3067,7 @@ class ViaStitchingDialog(viastitching_gui):
                     if via_uuid:
                         self.owned_via_ids.add(via_uuid)
                     phase_viacount += 1
+                    _remember_accepted(px, py)
                 yv += step_y
 
             return {
@@ -2520,8 +3103,8 @@ class ViaStitchingDialog(viastitching_gui):
             elif hasattr(via, "SetLayerSet"):
                 via.SetLayerSet(layer_set)
             via.SetNetCode(netcode)
-            via.SetDrill(drillsize + 2 * pad_margin)
-            via.SetWidth(viasize + 2 * pad_margin)
+            via.SetDrill(drillsize)
+            via.SetWidth(viasize)
             return via
 
         def _add_real_via(point):
@@ -2540,6 +3123,10 @@ class ViaStitchingDialog(viastitching_gui):
             via.SetWidth(viasize)
             via.SetDrill(drillsize)
             self.board.Add(via)
+            try:
+                via.SetNetCode(netcode)
+            except Exception:
+                pass
             self.CommitAdd(commit, via)
             if self.pcb_group is not None:
                 if commit is not None:
@@ -2552,12 +3139,339 @@ class ViaStitchingDialog(viastitching_gui):
             if via_uuid:
                 self.owned_via_ids.add(via_uuid)
 
-        def _run_maximize_pack():
-            via_clearance = max(1, int(round(viasize + (2 * pad_margin))))
-            via_clearance_sq = via_clearance * via_clearance
+        def _iter_pattern_points(pattern_name, phase_x, phase_y, step_px, step_py):
+            pattern_name = self.NormalizeTargetPattern(pattern_name)
+            sx = max(1, int(step_px))
+            sy = max(1, int(step_py))
+            base_x = left + ((int(phase_x) - left) % sx)
+            base_y = top + ((int(phase_y) - top) % sy)
 
-            sample_x = max(1, int(round(via_clearance / 2.0)))
-            sample_y = max(1, int(round(via_clearance / 2.0)))
+            if pattern_name == "Spiral":
+                center_x = 0.5 * float(left + right)
+                center_y = 0.5 * float(top + bottom)
+                kx0 = int(round((center_x - base_x) / float(sx)))
+                ky0 = int(round((center_y - base_y) / float(sy)))
+                grid_cx = base_x + (kx0 * sx)
+                grid_cy = base_y + (ky0 * sy)
+                kx_min = int(math.ceil((left - grid_cx) / float(sx)))
+                kx_max = int(math.floor((right - grid_cx) / float(sx)))
+                ky_min = int(math.ceil((top - grid_cy) / float(sy)))
+                ky_max = int(math.floor((bottom - grid_cy) / float(sy)))
+                if kx_min > kx_max or ky_min > ky_max:
+                    return
+
+                max_radius = max(abs(kx_min), abs(kx_max), abs(ky_min), abs(ky_max))
+                for radius in range(0, max_radius + 1):
+                    ring_values = []
+                    if radius == 0:
+                        ring_values.append((0, 0))
+                    else:
+                        for dx in range(-radius, radius + 1):
+                            ring_values.append((dx, -radius))
+                        for dy in range(-radius + 1, radius + 1):
+                            ring_values.append((radius, dy))
+                        for dx in range(radius - 1, -radius - 1, -1):
+                            ring_values.append((dx, radius))
+                        for dy in range(radius - 1, -radius, -1):
+                            ring_values.append((-radius, dy))
+                    for dx, dy in ring_values:
+                        if dx < kx_min or dx > kx_max or dy < ky_min or dy > ky_max:
+                            continue
+                        xv = grid_cx + (dx * sx)
+                        yv = grid_cy + (dy * sy)
+                        if xv < left or xv > right or yv < top or yv > bottom:
+                            continue
+                        yield (xv, yv)
+                return
+
+            staggered = (pattern_name == "45-degree offset")
+            row_index = 0
+            yv = base_y
+            while yv <= bottom:
+                xv = base_x
+                if staggered and (row_index % 2 == 1):
+                    xv += sx / 2.0
+                while xv <= right:
+                    yield (xv, yv)
+                    xv += sx
+                yv += sy
+                row_index += 1
+
+        def _evaluate_target_pattern(pattern_name, phase_x, phase_y, min_spacing_nm, target_limit=0):
+            spacing_nm = max(1, int(min_spacing_nm))
+            spacing_sq = float(spacing_nm * spacing_nm)
+            accepted_points = []
+            tested = 0
+            inside = 0
+            rejected_overlap_local = 0
+            rejected_edge_local = 0
+            accepted_bins = {}
+            cell_size = max(1, spacing_nm)
+
+            def _conflicts_with_accepted(px, py):
+                gx = int(px) // cell_size
+                gy = int(py) // cell_size
+                for nx in range(gx - 1, gx + 2):
+                    for ny in range(gy - 1, gy + 2):
+                        for ox, oy in accepted_bins.get((nx, ny), ()):
+                            dx = float(px - ox)
+                            dy = float(py - oy)
+                            if (dx * dx + dy * dy) < spacing_sq:
+                                return True
+                return False
+
+            def _remember_accepted(px, py):
+                key = (int(px) // cell_size, int(py) // cell_size)
+                accepted_bins.setdefault(key, []).append((int(px), int(py)))
+
+            for xv, yv in _iter_pattern_points(pattern_name, phase_x, phase_y, step_x, step_y):
+                tested += 1
+                p = self.ToBoardPoint(xv, yv)
+                if not self.IsPointInsideZoneWithMargin(p, required_edge_margin):
+                    rejected_edge_local += 1
+                    continue
+                inside += 1
+                px = int(round(xv))
+                py = int(round(yv))
+                if _conflicts_with_accepted(px, py):
+                    rejected_overlap_local += 1
+                    continue
+                probe = _new_probe_via(p)
+                if self.CheckOverlap(probe, reason_counts=overlap_reason_counts):
+                    rejected_overlap_local += 1
+                    continue
+                accepted_points.append((px, py, p))
+                _remember_accepted(px, py)
+
+            return {
+                "inserted": 0,
+                "candidates": tested,
+                "inside_zone": inside,
+                "rejected_overlap": rejected_overlap_local,
+                "rejected_edge_margin": rejected_edge_local,
+                "accepted_points": accepted_points,
+                "target_available": len(accepted_points),
+                "target_requested": int(target_limit) if target_limit else None,
+            }
+
+        def _select_spread_points(points, wanted_count):
+            if wanted_count <= 0 or len(points) <= wanted_count:
+                return list(points)
+            if not points:
+                return []
+
+            cx = 0.5 * float(left + right)
+            cy = 0.5 * float(top + bottom)
+
+            seed_index = min(
+                range(len(points)),
+                key=lambda i: (
+                    (float(points[i][0]) - cx) ** 2 + (float(points[i][1]) - cy) ** 2,
+                    float(points[i][1]),
+                    float(points[i][0]),
+                ),
+            )
+
+            chosen = [seed_index]
+            chosen_set = {seed_index}
+            min_dist_sq = [0.0] * len(points)
+
+            sx, sy, seed_point = points[seed_index]
+            for i, (px, py, point_obj) in enumerate(points):
+                dx = float(px - sx)
+                dy = float(py - sy)
+                min_dist_sq[i] = (dx * dx) + (dy * dy)
+
+            while len(chosen) < wanted_count:
+                best_idx = None
+                best_score = -1.0
+                best_y = 0.0
+                best_x = 0.0
+                for i, (px, py, point_obj) in enumerate(points):
+                    if i in chosen_set:
+                        continue
+                    score = min_dist_sq[i]
+                    if (
+                        best_idx is None
+                        or score > best_score
+                        or (score == best_score and (float(py) < best_y or (float(py) == best_y and float(px) < best_x)))
+                    ):
+                        best_idx = i
+                        best_score = score
+                        best_y = float(py)
+                        best_x = float(px)
+                if best_idx is None:
+                    break
+
+                chosen.append(best_idx)
+                chosen_set.add(best_idx)
+                bx, by, best_point = points[best_idx]
+                for i, (px, py, point_obj) in enumerate(points):
+                    if i in chosen_set:
+                        continue
+                    dx = float(px - bx)
+                    dy = float(py - by)
+                    d2 = (dx * dx) + (dy * dy)
+                    if d2 < min_dist_sq[i]:
+                        min_dist_sq[i] = d2
+
+            return [points[i] for i in chosen]
+
+        def _run_target_pattern_first(pattern_name, target_limit, min_spacing_nm):
+            pattern_name = self.NormalizeTargetPattern(pattern_name)
+            phase_count_x = 8
+            phase_count_y = 8
+            if pattern_name == "Spiral":
+                x_phases = [offset_x]
+                y_phases = [offset_y]
+            else:
+                x_phases = _phase_offsets(step_x, offset_x, phase_count_x)
+                y_phases = _phase_offsets(step_y, offset_y, phase_count_y)
+
+            best = None
+            best_score = None
+            for phase_y in y_phases:
+                for phase_x in x_phases:
+                    trial = _evaluate_target_pattern(
+                        pattern_name,
+                        phase_x,
+                        phase_y,
+                        min_spacing_nm,
+                        target_limit=target_limit,
+                    )
+                    score = (
+                        len(trial["accepted_points"]),
+                        -(trial["rejected_overlap"] + trial["rejected_edge_margin"]),
+                        -trial["rejected_edge_margin"],
+                    )
+                    if best is None or score > best_score:
+                        best = trial
+                        best_score = score
+                        best["phase_x"] = phase_x
+                        best["phase_y"] = phase_y
+
+            if best is None:
+                return {
+                    "inserted": 0,
+                    "candidates": 0,
+                    "inside_zone": 0,
+                    "rejected_overlap": 0,
+                    "rejected_edge_margin": 0,
+                    "target_available": 0,
+                    "target_requested": int(target_limit) if target_limit else None,
+                    "success": False,
+                    "accepted_points": [],
+                }
+
+            available = len(best.get("accepted_points", []))
+            success = bool(target_limit > 0 and available >= target_limit)
+            if not success:
+                return {
+                    "inserted": 0,
+                    "candidates": best["candidates"],
+                    "inside_zone": best["inside_zone"],
+                    "rejected_overlap": best["rejected_overlap"],
+                    "rejected_edge_margin": best["rejected_edge_margin"],
+                    "target_available": available,
+                    "target_requested": int(target_limit) if target_limit else None,
+                    "success": False,
+                    "pattern": pattern_name,
+                    "phase_x": best.get("phase_x"),
+                    "phase_y": best.get("phase_y"),
+                    "accepted_points": list(best.get("accepted_points", [])),
+                }
+
+            points_to_place = _select_spread_points(list(best.get("accepted_points", [])), int(target_limit))
+            predicted_count = len(points_to_place)
+            if predicted_count and not self.PromptLargePlacementWarning(
+                predicted_count,
+                maximize_mode=False,
+                mode_name=f"target-{pattern_name}",
+            ):
+                return {
+                    "inserted": 0,
+                    "candidates": best["candidates"],
+                    "inside_zone": best["inside_zone"],
+                    "rejected_overlap": best["rejected_overlap"],
+                    "rejected_edge_margin": best["rejected_edge_margin"],
+                    "target_available": available,
+                    "target_requested": int(target_limit) if target_limit else None,
+                    "canceled": True,
+                    "success": False,
+                }
+
+            if points_to_place and self.pcb_group is None:
+                self.EnsureCurrentZoneGroup(commit=commit)
+            for point_x, point_y, point in points_to_place:
+                _add_real_via(point)
+
+            inserted = len(points_to_place)
+            return {
+                "inserted": inserted,
+                "candidates": best["candidates"],
+                "inside_zone": best["inside_zone"],
+                "rejected_overlap": best["rejected_overlap"],
+                "rejected_edge_margin": best["rejected_edge_margin"],
+                "target_available": available,
+                "target_requested": int(target_limit) if target_limit else None,
+                "success": True,
+                "pattern": pattern_name,
+                "phase_x": best.get("phase_x"),
+                "phase_y": best.get("phase_y"),
+                "accepted_points": list(points_to_place),
+            }
+
+        def _select_target_subset(candidate_points, selected_indices, wanted_count):
+            if wanted_count <= 0 or len(selected_indices) <= wanted_count:
+                return list(selected_indices)
+            if not selected_indices:
+                return []
+
+            cx = 0.5 * float(left + right)
+            cy = 0.5 * float(top + bottom)
+
+            remaining = list(selected_indices)
+            seed_idx = min(
+                remaining,
+                key=lambda i: (
+                    (float(candidate_points[i][0]) - cx) ** 2
+                    + (float(candidate_points[i][1]) - cy) ** 2
+                ),
+            )
+            chosen = [seed_idx]
+            remaining.remove(seed_idx)
+
+            while len(chosen) < wanted_count and remaining:
+                best_idx = None
+                best_score = -1.0
+                for idx in remaining:
+                    px, py, candidate_point = candidate_points[idx]
+                    nearest_sq = None
+                    for chosen_idx in chosen:
+                        ox, oy, chosen_point = candidate_points[chosen_idx]
+                        dx = float(px - ox)
+                        dy = float(py - oy)
+                        d2 = (dx * dx) + (dy * dy)
+                        if nearest_sq is None or d2 < nearest_sq:
+                            nearest_sq = d2
+                    if nearest_sq is None:
+                        nearest_sq = 0.0
+                    if nearest_sq > best_score:
+                        best_score = nearest_sq
+                        best_idx = idx
+                if best_idx is None:
+                    break
+                chosen.append(best_idx)
+                remaining.remove(best_idx)
+
+            return chosen
+
+        def _run_maximize_pack(min_spacing_nm=None, target_limit=None, mode_name="maximize"):
+            pack_spacing = max(1, int(min_spacing_nm if min_spacing_nm is not None else via_clearance))
+            pack_spacing_sq = float(pack_spacing * pack_spacing)
+
+            sample_x = max(1, int(round(pack_spacing / 2.0)))
+            sample_y = max(1, int(round(pack_spacing / 2.0)))
 
             width = max(1, int(right - left + 1))
             height = max(1, int(bottom - top + 1))
@@ -2592,7 +3506,7 @@ class ViaStitchingDialog(viastitching_gui):
                     inside += 1
 
                     probe = _new_probe_via(p)
-                    if self.CheckOverlap(probe):
+                    if self.CheckOverlap(probe, reason_counts=overlap_reason_counts):
                         reject_overlap_static += 1
                         xv += sample_x
                         continue
@@ -2611,21 +3525,21 @@ class ViaStitchingDialog(viastitching_gui):
                     "rejected_edge_margin": reject_edge,
                 }
 
-            cell_size = max(1, int(via_clearance))
-            max_sep = via_clearance
+            cell_size = max(1, int(pack_spacing))
+            max_sep = pack_spacing
             neighbor_span = max(1, int(math.ceil(float(max_sep) / float(cell_size))))
 
             candidate_bins = {}
-            for idx, (cx, cy, _) in enumerate(candidates_xy):
+            for idx, (cx, cy, candidate_point) in enumerate(candidates_xy):
                 key = (cx // cell_size, cy // cell_size)
                 candidate_bins.setdefault(key, []).append(idx)
 
             def _conflict(idx_a, idx_b):
-                ax, ay, _ = candidates_xy[idx_a]
-                bx, by, _ = candidates_xy[idx_b]
+                ax, ay, point_a = candidates_xy[idx_a]
+                bx, by, point_b = candidates_xy[idx_b]
                 dx = abs(ax - bx)
                 dy = abs(ay - by)
-                return (dx * dx + dy * dy) < via_clearance_sq
+                return (dx * dx + dy * dy) < pack_spacing_sq
 
             def _neighbor_indices(xc, yc, bins_dict):
                 base_x = xc // cell_size
@@ -2636,7 +3550,7 @@ class ViaStitchingDialog(viastitching_gui):
                             yield other_idx
 
             conflict_counts = [0] * len(candidates_xy)
-            for idx, (cx, cy, _) in enumerate(candidates_xy):
+            for idx, (cx, cy, candidate_point) in enumerate(candidates_xy):
                 count = 0
                 for other_idx in _neighbor_indices(cx, cy, candidate_bins):
                     if other_idx == idx:
@@ -2677,7 +3591,7 @@ class ViaStitchingDialog(viastitching_gui):
                 selected = []
                 selected_bins = {}
                 for idx in order:
-                    cx, cy, _ = candidates_xy[idx]
+                    cx, cy, candidate_point = candidates_xy[idx]
                     can_place = True
                     for other_idx in _neighbor_indices(cx, cy, selected_bins):
                         if _conflict(idx, other_idx):
@@ -2692,35 +3606,144 @@ class ViaStitchingDialog(viastitching_gui):
                 if len(selected) > len(best_selection):
                     best_selection = selected
 
-            if self.pcb_group is None and best_selection:
+            available_selection = list(best_selection)
+            selection_to_place = list(best_selection)
+            if target_limit is not None and target_limit > 0 and len(selection_to_place) > target_limit:
+                selection_to_place = _select_target_subset(candidates_xy, selection_to_place, target_limit)
+
+            predicted_count = len(selection_to_place)
+            if predicted_count and not self.PromptLargePlacementWarning(
+                predicted_count,
+                maximize_mode=(mode_name == "maximize"),
+                mode_name=mode_name
+            ):
+                _debug_log(
+                    f"FillupArea {mode_name} pack: canceled by large-placement warning "
+                    f"(selected={predicted_count})"
+                )
+                return {
+                    "inserted": 0,
+                    "candidates": tested,
+                    "inside_zone": inside,
+                    "rejected_overlap": reject_overlap_static,
+                    "rejected_edge_margin": reject_edge,
+                    "canceled": True,
+                    "target_available": len(available_selection),
+                    "target_requested": int(target_limit) if target_limit is not None else None,
+                }
+
+            if self.pcb_group is None and selection_to_place:
                 self.EnsureCurrentZoneGroup(commit=commit)
 
-            for idx in best_selection:
+            for idx in selection_to_place:
                 _add_real_via(candidates_xy[idx][2])
 
-            rejected_overlap_total = reject_overlap_static + max(0, len(candidates_xy) - len(best_selection))
+            rejected_overlap_total = reject_overlap_static + max(0, len(candidates_xy) - len(selection_to_place))
             _debug_log(
-                "FillupArea maximize pack: "
+                f"FillupArea {mode_name} pack: "
                 f"sample=({sample_x},{sample_y}) candidates={len(candidates_xy)} "
-                f"selected={len(best_selection)} tested={tested} inside={inside} "
+                f"selected={len(selection_to_place)} tested={tested} inside={inside} "
                 f"rejected_edge={reject_edge} rejected_overlap={rejected_overlap_total}"
             )
             return {
-                "inserted": len(best_selection),
+                "inserted": len(selection_to_place),
                 "candidates": tested,
                 "inside_zone": inside,
                 "rejected_overlap": rejected_overlap_total,
                 "rejected_edge_margin": reject_edge,
+                "target_available": len(available_selection),
+                "target_requested": int(target_limit) if target_limit is not None else None,
             }
 
+        target_fallback_used = False
         if maximize_vias:
-            applied = _run_maximize_pack()
+            applied = _run_maximize_pack(mode_name="maximize")
+        elif target_mode:
+            spacing_min_target = max(via_clearance, int(round(min(step_x, step_y))))
+            target_attempt = _run_target_pattern_first(
+                target_pattern,
+                target_count,
+                spacing_min_target,
+            )
+            if target_attempt.get("canceled"):
+                applied = target_attempt
+            elif target_attempt.get("success"):
+                _debug_log(
+                    "FillupArea target deterministic success: "
+                    f"pattern={target_pattern} phase=({target_attempt.get('phase_x')},"
+                    f"{target_attempt.get('phase_y')}) inserted={target_attempt.get('inserted')}"
+                )
+                applied = target_attempt
+            else:
+                deterministic_available = int(target_attempt.get("target_available", 0) or 0)
+                use_fallback = False
+                if show_message:
+                    use_fallback = self.PromptTargetHeuristicFallback(
+                        target_pattern,
+                        target_count,
+                        deterministic_available,
+                    )
+                if use_fallback:
+                    target_fallback_used = True
+                    pattern_token = str(target_pattern).lower().replace(" ", "-")
+                    _debug_log(
+                        "FillupArea target deterministic miss: "
+                        f"pattern={target_pattern} available={deterministic_available} "
+                        f"requested={target_count}; user accepted heuristic fallback."
+                    )
+                    applied = _run_maximize_pack(
+                        min_spacing_nm=spacing_min_target,
+                        target_limit=target_count,
+                        mode_name=f"target-fallback-{pattern_token}",
+                    )
+                    if "target_deterministic_available" not in applied:
+                        applied["target_deterministic_available"] = deterministic_available
+                else:
+                    _debug_log(
+                        "FillupArea target deterministic miss: "
+                        f"pattern={target_pattern} available={deterministic_available} "
+                        f"requested={target_count}; using deterministic best-effort only."
+                    )
+                    best_points = list(target_attempt.get("accepted_points", []))
+                    predicted_count = len(best_points)
+                    if predicted_count and not self.PromptLargePlacementWarning(
+                        predicted_count,
+                        maximize_mode=False,
+                        mode_name=f"target-{target_pattern}-best-effort",
+                    ):
+                        applied = {
+                            "inserted": 0,
+                            "candidates": target_attempt.get("candidates", 0),
+                            "inside_zone": target_attempt.get("inside_zone", 0),
+                            "rejected_overlap": target_attempt.get("rejected_overlap", 0),
+                            "rejected_edge_margin": target_attempt.get("rejected_edge_margin", 0),
+                            "target_available": deterministic_available,
+                            "target_requested": target_count,
+                            "target_deterministic_available": deterministic_available,
+                            "canceled": True,
+                        }
+                    else:
+                        if best_points and self.pcb_group is None:
+                            self.EnsureCurrentZoneGroup(commit=commit)
+                        for point_x, point_y, point in best_points:
+                            _add_real_via(point)
+                        applied = {
+                            "inserted": len(best_points),
+                            "candidates": target_attempt.get("candidates", 0),
+                            "inside_zone": target_attempt.get("inside_zone", 0),
+                            "rejected_overlap": target_attempt.get("rejected_overlap", 0),
+                            "rejected_edge_margin": target_attempt.get("rejected_edge_margin", 0),
+                            "target_available": deterministic_available,
+                            "target_requested": target_count,
+                            "target_deterministic_available": deterministic_available,
+                        }
         else:
             best_phase_x = offset_x
             best_phase_y = offset_y
             x_phases = _phase_offsets(step_x, offset_x, 6 if not center_segments else 1)
             y_phases = _phase_offsets(step_y, offset_y, 8)
             best_score = None
+            best_trial = None
             for phase_y in y_phases:
                 for phase_x in x_phases:
                     trial = _run_phase(phase_x, phase_y, apply_changes=False)
@@ -2733,16 +3756,29 @@ class ViaStitchingDialog(viastitching_gui):
                         best_score = score
                         best_phase_x = phase_x
                         best_phase_y = phase_y
+                        best_trial = trial
             _debug_log(
                 f"FillupArea phase search: best_phase=({best_phase_x},{best_phase_y}) "
                 f"score={best_score}"
             )
+            predicted_inserted = best_trial["inserted"] if isinstance(best_trial, dict) else 0
+            if predicted_inserted and not self.PromptLargePlacementWarning(predicted_inserted, maximize_mode=False, mode_name="grid"):
+                _debug_log(
+                    f"FillupArea: canceled by large-placement warning "
+                    f"(predicted_inserted={predicted_inserted})"
+                )
+                return False
             applied = _run_phase(best_phase_x, best_phase_y, apply_changes=True)
+        if applied.get("canceled"):
+            self.UpdateActionButtons()
+            return False
         viacount = applied["inserted"]
         candidates = applied["candidates"]
         inside_zone = applied["inside_zone"]
         rejected_overlap = applied["rejected_overlap"]
         rejected_edge_margin = applied["rejected_edge_margin"]
+        target_available = applied.get("target_available")
+        target_requested = applied.get("target_requested")
 
         self.last_fill_stats = {
             "inserted": viacount,
@@ -2751,7 +3787,28 @@ class ViaStitchingDialog(viastitching_gui):
             "rejected_overlap": rejected_overlap,
             "rejected_edge_margin": rejected_edge_margin,
             "pruned_stale_vias": self.pruned_stale_vias,
+            "target_available": target_available,
+            "target_requested": target_requested,
+            "target_pattern": target_pattern if target_mode else None,
+            "target_fallback_used": target_fallback_used,
+            "target_deterministic_available": applied.get("target_deterministic_available"),
         }
+
+        if (
+            target_mode
+            and show_message
+            and target_requested is not None
+            and target_available is not None
+            and int(target_available) < int(target_requested)
+            and viacount > 0
+        ):
+            _show_info(
+                self,
+                _(u"ViaStitching"),
+                _(
+                    u"Requested %d vias, but only %d can be placed with current spacing/margins/overlap constraints."
+                ) % (int(target_requested), int(target_available)),
+            )
 
         if viacount > 0 and push_commit:
             self.CommitPush(commit, "ViaStitching: Fill")
@@ -2777,6 +3834,20 @@ class ViaStitchingDialog(viastitching_gui):
                 _(u"Rejected by overlap/pad-margin checks: %d") % rejected_overlap,
                 _(u"Rejected by edge margin checks: %d") % rejected_edge_margin,
             ]
+            if overlap_reason_counts:
+                reason_names = {
+                    "pad": _(u"pad"),
+                    "via": _(u"via"),
+                    "via_bbox": _(u"via-bbox"),
+                    "zone": _(u"zone"),
+                    "arc": _(u"arc"),
+                    "track": _(u"track"),
+                }
+                ordered_reasons = sorted(overlap_reason_counts.items(), key=lambda kv: kv[1], reverse=True)
+                top_reasons = []
+                for reason_key, reason_count in ordered_reasons[:4]:
+                    top_reasons.append(f"{reason_names.get(reason_key, reason_key)}={reason_count}")
+                details.append(_(u"Top overlap reasons: %s") % ", ".join(top_reasons))
             if self.pruned_stale_vias > 0:
                 details.append(_(u"Removed stale plugin vias outside zone: %d") % self.pruned_stale_vias)
 
@@ -2805,24 +3876,26 @@ class ViaStitchingDialog(viastitching_gui):
             elif rejected_edge_margin == inside_zone:
                 details.append(_(u"All in-zone points were rejected by edge margin. Reduce edge margin or spacing."))
 
-            wx.MessageBox("\n".join(details))
+            details_message = "\n".join(details)
+            _debug_log("FillupArea: no vias inserted; showing details popup")
+            _show_info(self, _(u"ViaStitching"), details_message)
+            self._last_noop_popup_shown = True
         _debug_log(
             f"FillupArea: done inserted={viacount} candidates={candidates} inside={inside_zone} "
             f"rejected_overlap={rejected_overlap} rejected_edge={rejected_edge_margin} "
             f"pruned_stale={self.pruned_stale_vias}"
         )
+        if overlap_reason_counts:
+            _debug_log(f"FillupArea overlap reasons: {overlap_reason_counts}")
         self.UpdateActionButtons()
         return viacount > 0
 
     def EnsureCurrentZoneGroup(self, commit=None):
-        self.pcb_group = None
-        for group in self.GetGroups():
-            if group.GetName() == self.viagroupname:
-                self.pcb_group = group
-                break
+        self.NormalizePluginGroups(commit=commit)
+        self.pcb_group = self.FindGroupByName(self.viagroupname)
 
         if self.pcb_group is None:
-            self.pcb_group = pcbnew.PCB_GROUP(None)
+            self.pcb_group = pcbnew.PCB_GROUP(self.board)
             self.pcb_group.SetName(self.viagroupname)
             self.board.Add(self.pcb_group)
             if commit is not None:
@@ -2853,9 +3926,22 @@ class ViaStitchingDialog(viastitching_gui):
 
     def onProcessAction(self, event):
         """Manage main button (Ok) click event."""
+        if getattr(self, "_action_in_progress", False):
+            _debug_log("onProcessAction: ignored because another action is already in progress")
+            _show_info(
+                self,
+                _(u"ViaStitching"),
+                _(u"Another via-stitching action is still running. Please wait a moment and try again.")
+            )
+            return
         if not self.IsSelectionValid():
             _debug_log("onProcessAction: ignored because selection is not valid")
             self.UpdateActionButtons()
+            _show_info(
+                self,
+                _(u"ViaStitching"),
+                _(u"No valid zone is selected.\n\nSelect exactly one copper zone tied to a net, then press Ok.")
+            )
             return
         if not self.ConfirmNetSelectionMismatch(_(u"place/update via array")):
             _debug_log("onProcessAction: canceled by net mismatch warning")
@@ -2880,8 +3966,15 @@ class ViaStitchingDialog(viastitching_gui):
                 self.viagroupname = __viagroupname_base__ + zone_name
 
             commit = self.RequireUndoBackend("onProcessAction")
+            self.NormalizePluginGroups(commit=commit)
 
             self.include_other_layers = self.m_chkIncludeOtherLayers.GetValue()
+            self.block_footprint_zones = (
+                self.m_chkAvoidFootprintZones.GetValue() if hasattr(self, "m_chkAvoidFootprintZones") else True
+            )
+            self.allow_same_net_under_pad = (
+                self.m_chkAllowSameNetUnderPad.GetValue() if hasattr(self, "m_chkAllowSameNetUnderPad") else False
+            )
             self.ClearEditorSelection()
 
             include_user_vias = False
@@ -2902,6 +3995,24 @@ class ViaStitchingDialog(viastitching_gui):
                 self.CloseDialog(wx.ID_OK)
             else:
                 _debug_log("onProcessAction: no vias placed")
+                if not self._last_noop_popup_shown:
+                    _show_info(
+                        self,
+                        _(u"ViaStitching"),
+                        _(u"No vias were placed.\n\nAdjust spacing/margins or refill zone copper, then try again.")
+                    )
+        except Exception as e:
+            _debug_log_force(
+                "onProcessAction: unexpected exception "
+                f"error={type(e).__name__}: {e}"
+            )
+            _debug_log_force(traceback.format_exc())
+            _show_error_with_log(
+                self,
+                _(u"ViaStitching Error"),
+                _(u"Via stitching failed unexpectedly. See the log for full details."),
+                context="on_process_action_exception"
+            )
         finally:
             self.EndActionContext()
 
