@@ -716,8 +716,8 @@ class ViaStitchingDialog(viastitching_gui):
             (self.m_txtHOffset, _(u"Horizontal offset of the via grid. Ignored when maximize or target mode is enabled.")),
             (self.m_staticText6, _(u"Extra distance from via edge to zone boundary.")),
             (self.m_txtClearance, _(u"Edge margin: via edge to zone boundary distance.")),
-            (self.m_staticTextPadMargin, _(u"Extra distance from vias to pads/tracks/vias/zones during overlap checks.")),
-            (self.m_txtPadMargin, _(u"Pad margin: additional spacing used in overlap rejection.")),
+            (self.m_staticTextPadMargin, _(u"Extra distance from vias to pads during overlap checks.")),
+            (self.m_txtPadMargin, _(u"Pad margin: additional spacing against pads in overlap rejection.")),
             (self.m_chkClearOwn, _(u"Internal compatibility option.")),
             (self.m_chkRandomize, _(u"Apply small random jitter to each grid point.")),
             (self.m_chkIncludeOtherLayers, _(u"If enabled, reject vias that collide with copper objects on any copper layer. Disable to only check the selected zone layer.")),
@@ -2762,8 +2762,47 @@ class ViaStitchingDialog(viastitching_gui):
                     _count_reason("via_bbox")
                     return True
             elif type(item).__name__ in ['ZONE', 'FP_ZONE', 'PCB_ZONE', 'ZONE_CONTAINER', 'ZONE_PROXY']:
-                if item.GetBoundingBox().Intersects(via_bbox):
+                zone_layers = self.GetZoneHitTestLayers(item)
+                if not zone_layers:
+                    if item.GetBoundingBox().Intersects(via_bbox):
+                        _count_reason("zone_bbox")
+                        return True
+                    continue
+
+                zone_hit = False
+                center = via.GetPosition()
+                sample_radius = max(1, int(round(float(via.GetWidth()) / 2.0)))
+                sample_count = 16
+                for layer in zone_layers:
+                    if (not self.include_other_layers) and (layer not in self.target_layers):
+                        continue
+                    try:
+                        if item.HitTestFilledArea(layer, center, 0):
+                            zone_hit = True
+                            break
+                        for i in range(sample_count):
+                            angle = (2.0 * math.pi * i) / sample_count
+                            px = center.x + (sample_radius * math.cos(angle))
+                            py = center.y + (sample_radius * math.sin(angle))
+                            if item.HitTestFilledArea(layer, self.ToBoardPoint(px, py), 0):
+                                zone_hit = True
+                                break
+                        if zone_hit:
+                            break
+                    except Exception:
+                        if item.GetBoundingBox().Intersects(via_bbox):
+                            zone_hit = True
+                            break
+                if zone_hit:
                     _count_reason("zone")
+                    zone_name = ""
+                    try:
+                        zone_name = item.GetZoneName() or ""
+                    except Exception:
+                        zone_name = ""
+                    zone_net = _item_netname(item) or ""
+                    zone_key = f"zone[{zone_name if zone_name else '?'}|{zone_net if zone_net else '?'}]"
+                    _count_reason(zone_key)
                     return True
             elif type(item).__name__ in ['PCB_TRACK', 'PCB_ARC']:
                 try:
