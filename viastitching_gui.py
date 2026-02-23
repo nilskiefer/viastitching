@@ -156,6 +156,22 @@ class viastitching_gui ( wx.Dialog ):
 		self.m_chkMaximizeVias.SetValue(False)
 		bLeftOptions.Add( self.m_chkMaximizeVias, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
+		bMaxMinSpacingSizer = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.m_chkMaximizeMinDistance = wx.CheckBox( self, wx.ID_ANY, _(u"Maximize min c-c"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkMaximizeMinDistance.SetValue(False)
+		bMaxMinSpacingSizer.Add( self.m_chkMaximizeMinDistance, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 6 )
+
+		self.m_txtMaximizeMinDistance = wx.TextCtrl( self, wx.ID_ANY, _(u"0"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_txtMaximizeMinDistance.SetMinSize( wx.Size( 72,-1 ) )
+		bMaxMinSpacingSizer.Add( self.m_txtMaximizeMinDistance, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 4 )
+
+		self.m_lblUnitMaximizeMinDistance = wx.StaticText( self, wx.ID_ANY, _(u"mm"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblUnitMaximizeMinDistance.Wrap( -1 )
+		bMaxMinSpacingSizer.Add( self.m_lblUnitMaximizeMinDistance, 0, wx.ALIGN_CENTER_VERTICAL, 0 )
+
+		bLeftOptions.Add( bMaxMinSpacingSizer, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
 		bTargetSizer = wx.BoxSizer( wx.HORIZONTAL )
 
 		self.m_chkTargetViaCount = wx.CheckBox( self, wx.ID_ANY, _(u"Place target vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
