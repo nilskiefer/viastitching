@@ -34,13 +34,12 @@ Compared to upstream, this fork adds substantial functionality and hardening:
 ## Requirements
 
 - KiCad with Python plugin support (tested primarily on KiCad 9)
-- No manual `pip` installation is required for normal plugin use
 
 ## Installation
 
 Install like any other KiCad plugin by placing this folder in a KiCad plugin search path (user plugin directory recommended), then restart KiCad.
 
-In typical usage, just install the plugin and run it from KiCad. You do not need to manually enable extra API switches or install `requirements.txt` yourself.
+In typical usage, just install the plugin and run it from KiCad.
 
 ## Typical workflow
 
@@ -72,9 +71,9 @@ When startup or runtime fails, inspect:
 
 ## Screenshots
 
-- Preview: `preview.png`
-- Dialog: `pictures/viastitching_dialog.png`
-- Result example: `pictures/viastitching_result.png`
+![ViaStitching Icon](viastitching.png)
+
+![ViaStitching Preview](preview.png)
 
 ## Attribution
 
