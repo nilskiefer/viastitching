@@ -1,127 +1,83 @@
-# ViaStitching
+# ViaStitching 2.0
 
-Via Stitching action-plugin for use with KiCAD 6.0+ (updated for KiCad 9 compatibility).
+ViaStitching 2.0 is a maintained fork of the original [weirdgyn/viastitching](https://github.com/weirdgyn/viastitching), focused on modern KiCad workflows and safer editing behavior.
 
-Fill a selected copper area with a pattern of vias.
+The plugin fills selected copper zones with stitching vias for thermal and current handling, while preserving ownership and settings per zone.
 
-## When to use this tool
+## What changed in this fork
 
-Whenever you need to fill a copper area with vias to improve thermal or current conduction this tool is the answer (yet not the best one probably). The plugin is based on pre-existing areas so you have to define and select one before invoking the plugin.
+Compared to upstream, this fork adds substantial functionality and hardening:
 
-## Install
+- KiCad 9 compatibility improvements and safer Undo/Redo behavior.
+- PCB-embedded metadata for per-zone settings and owned-via tracking (versioned with the `.kicad_pcb` file).
+- Dedicated actions:
+  - `Update Via Array`
+  - `Update Via Array (Maximize)`
+  - `Remove Via Array`
+  - `Clean Orphan Vias`
+- Improved placement modes:
+  - Standard grid placement
+  - `45-degree offset` pattern
+  - `Spiral` pattern
+  - Target-via-count mode
+  - Dense maximize packing mode (non-grid)
+- Better placement quality controls:
+  - Segment centering for cleaner local distribution
+  - Edge and pad margins
+  - Optional all-layer overlap checks
+  - Optional footprint-zone blocking and same-net-under-pad behavior controls
+- Stronger UX and diagnostics:
+  - Better failure messages and bootstrap/load error logging
+  - Preview support in dialog flow
+  - Persistent prompt choices with reset support
 
-As any other KiCAD plugin - ViaStitching must be installed into one of the allowed path, my personal advice is to install it as a user plugin.
-To install it as user plugin on Windows systems (KiCAD 7.0) you should put plugins files into:
+## Requirements
 
-C:\Users\<user_folder>\Documents\KiCad\7.0\scripting\plugins\viastitching
+- KiCad with Python plugin support (tested primarily on KiCad 9)
+- No manual `pip` installation is required for normal plugin use
 
-## KiCad 9 IPC mode (undo/redo-safe backend)
+## Installation
 
-This repo now includes a KiCad 9 IPC plugin manifest (`plugin.json`) and IPC entrypoints:
-- `ipc/update_via_array.py`
-- `ipc/update_via_array_maximize.py`
-- `ipc/remove_via_array.py`
-- `ipc/clean_orphan_vias.py`
+Install like any other KiCad plugin by placing this folder in a KiCad plugin search path (user plugin directory recommended), then restart KiCad.
 
-For KiCad 9 IPC actions:
-1. Enable `Preferences -> Plugins -> Enable KiCad API`.
-2. Make sure the plugin environment installs `requirements.txt`.
-3. Use the IPC actions from the plugin menu.
+In typical usage, just install the plugin and run it from KiCad. You do not need to manually enable extra API switches or install `requirements.txt` yourself.
 
-The ActionPlugin entrypoint (`Tools -> External Plugins -> ViaStitching`) is also available and runs in a single modal action flow, matching the behavior style of mature legacy plugins.
+## Typical workflow
 
-The IPC backend (`ipc/viastitching_ipc.py`) groups each operation into a single KiCad board commit (`begin_commit/push_commit`), so Undo/Redo is coherent for create/remove/update actions.
-Plugin ownership/settings are stored in PCB-embedded metadata (not only local plugin files), so reverting PCB commits also reverts array ownership state.
-`Update Via Array (Maximize)` now uses dense non-grid candidate packing to maximize via count while respecting overlap checks and edge/pad margins.
-
-## How it works (KiCad 9 IPC)
-
-1. Select one copper zone in PCB Editor.
+1. Select a copper zone in PCB Editor.
 2. Run `Update Via Array` (or `Update Via Array (Maximize)`).
-3. A settings dialog opens for that selected zone (size/drill, spacing/offset, edge margin, pad margin, layer overlap scope, centering, maximize).
-4. Confirm with `OK` to apply one transactional update commit.
+3. Configure via geometry and placement settings.
+4. Press `OK` to apply changes.
 
-Notes:
-- The zone net is always derived from the selected zone and is read-only.
-- In maximize mode, spacing/offset fields are ignored (and disabled in the ActionPlugin dialog). Placement is driven by via geometry plus edge/pad margins.
-- If no filled copper is available, the plugin asks whether to rebuild zone copper.
-- If user-placed vias exist on the selected zone net inside the zone, the plugin asks whether to replace them.
-- `Remove Via Array` removes plugin-owned vias for the selected zone; if user vias are detected in the same zone/net, it asks whether to remove those too.
-- `Clean Orphan Vias` removes plugin-owned vias that no longer belong inside their owning zones.
-- In the ActionPlugin dialog, options (including `Reset Prompt Choices` and `Clean Orphan Vias`) are in the left-side options panel; bottom-row actions are `Cancel`, `Remove Via Array`, and `OK`.
+Related maintenance actions:
 
-Ownership and settings are persisted in PCB metadata, so commit/revert in git keeps via-array state coherent with the board revision.
+- `Remove Via Array`: removes plugin-owned vias for the selected zone (optionally includes matching user vias).
+- `Clean Orphan Vias`: removes plugin-owned vias no longer valid for their zone ownership.
 
-## TODO
+## Behavior details
 
-Some features still to code:
-- [x] Match user units (mm/inches).
-- [x] Add clear area function.
-- [ ] Draw a better UI (if anyone is willing to contribute please read the following section).
-- [x] Collision between new vias and underlying objects: 
-   - [x] tracks, 
-   - [x] zones,
-   - [x] pads,
-   - [x] footprint zones,
-   - [x] modules,
-   - [x] vias.
-- [ ] Different fillup patterns/modes (bounding box, centered spiral).
-- [x] Avoid placing vias near area edges (define clearance).
-- [x] History management (board commit).
-- [ ] Localization.
-- [x] Support for multiple zones
-- [x] Storage of stitching configuration for each individual zone in PCB metadata.
-- [ ] Any request?
+- Zone net is derived from the selected zone.
+- In maximize mode, spacing/offset controls are ignored in favor of dense candidate packing.
+- If zone copper is stale/unfilled, the plugin can prompt to rebuild copper.
+- Ownership and zone settings are stored in PCB metadata, so git revert/checkouts keep via-array state aligned with board history.
 
-## Coding notes
+## Troubleshooting logs
 
-If you are willing to make any modification to the GUI (you're welcome) trough __wxFormBuilder__ (```viastitching.fbp``` file) remember to modify this line (around line 25 ```viastitching_gui.py```):
-```
-self.SetSizeHints( wx.DefaultSize, wx.DefaultSize )
-```
-In this way:
-```
-if sys.version_info[0] == 2:
- self.SetSizeHintsSz( wx.DefaultSize, wx.DefaultSize )
-else:
- self.SetSizeHints( wx.DefaultSize, wx.DefaultSize )
-```
-This modification allows the code to work with __Python 2__ (that's the standard KiCAD/Python distribution AFAIK) as long as __Python 3__, please note that you need to ```import sys```. Special thanks to *NilujePerchut* for this hint.
+When startup or runtime fails, inspect:
 
-## kicad-action-scripts - ViaStitching plugin similarity
+- `viastitching_plugin_error.log` (plugin folder)
+- `viastitching_bootstrap.log` (inside plugin files)
+- `viastitching_ipc.log` in the KiCad plugin settings path for this plugin (fallback: `~/.config/viastitching/`)
+- `viastitching_debug.log` (plugin folder)
 
-Yes my plugin is pretty similar to this plugin but I'm using a radically different approach in coding. At the time I wrote the first release of my plugin unluckly __jsreynaud__ plugin wasn't working but I bet he will fix it.
+## Screenshots
 
-## References
+- Preview: `preview.png`
+- Dialog: `pictures/viastitching_dialog.png`
+- Result example: `pictures/viastitching_result.png`
 
-Some useful references that helped me coding this plugin:
-1. https://sourceforge.net/projects/wxformbuilder/
-2. https://wxpython.org/
-3. http://docs.kicad-pcb.org/doxygen-python/namespacepcbnew.html
-4. https://forum.kicad.info/c/external-plugins
-5. https://github.com/KiCad/kicad-source-mirror/blob/master/Documentation/development/pcbnew-plugins.md
-6. https://kicad.mmccoo.com/
-7. http://docs.kicad-pcb.org/5.1.4/en/pcbnew/pcbnew.html#kicad_scripting_reference
+## Attribution
 
-
-Tool I got inspired by:
-- Altium Via Stitching feature!
-- https://github.com/jsreynaud/kicad-action-scripts
-
-## Greetings
-
-Hope someone find my work useful or at least *inspiring* to create something else/better.
-Special thanks to everyone that contributed to this project:
-- [Giulio Borsoi](https://github.com/giulio-borsoi)
-- [danwood76](https://github.com/danwood76)
-- [NilujePerchut](https://github.com/NilujePerchut)
-
-Last but not least, I would like to thank everyone who shared their knowledge of Python and KiCAD with me: Thanks!
-#
-
-Live long and prosper!
-
-That's all folks.
-
-By[t]e{s}
- Weirdgyn
+- Original project: [weirdgyn/viastitching](https://github.com/weirdgyn/viastitching)
+- Fork: [nilskiefer/viastitching2.0](https://github.com/nilskiefer/viastitching2.0)
+- License: MIT (see `LICENSE`)
