@@ -23,41 +23,34 @@ This repo now includes a KiCad 9 IPC plugin manifest (`plugin.json`) and IPC ent
 - `ipc/remove_via_array.py`
 - `ipc/clean_orphan_vias.py`
 
-For KiCad 9:
+For KiCad 9 IPC actions:
 1. Enable `Preferences -> Plugins -> Enable KiCad API`.
 2. Make sure the plugin environment installs `requirements.txt`.
 3. Use the IPC actions from the plugin menu.
 
+The ActionPlugin entrypoint (`Tools -> External Plugins -> ViaStitching`) is also available and runs in a single modal action flow, matching the behavior style of mature legacy plugins.
+
 The IPC backend (`ipc/viastitching_ipc.py`) groups each operation into a single KiCad board commit (`begin_commit/push_commit`), so Undo/Redo is coherent for create/remove/update actions.
 Plugin ownership/settings are stored in PCB-embedded metadata (not only local plugin files), so reverting PCB commits also reverts array ownership state.
-The IPC placement engine centers via rows inside local discontinuous zone segments for neater arrays; a dedicated `Update Via Array (Maximize)` action runs multi-phase search to pack more vias while respecting edge/pad margins.
+`Update Via Array (Maximize)` now uses dense non-grid candidate packing to maximize via count while respecting overlap checks and edge/pad margins.
 
-## How it works
+## How it works (KiCad 9 IPC)
 
-The workflow is pretty simple: select the area you want to fill (or select an existing stitching group), click on ```Tools->External Plugins->ViaStitching``` or click on ![AddNet icon](viastitching.png?raw=true) toolbar icon: a dilaog like the one below should appear:
+1. Select one copper zone in PCB Editor.
+2. Run `Update Via Array` (or `Update Via Array (Maximize)`).
+3. A settings dialog opens for that selected zone (size/drill, spacing/offset, edge margin, pad margin, layer overlap scope, centering, maximize).
+4. Confirm with `OK` to apply one transactional update commit.
 
-![ViaStitching dialog](pictures/viastitching_dialog.png?raw=true "ViaStitching dialog")
+Notes:
+- The zone net is always derived from the selected zone and is read-only.
+- In maximize mode, spacing/offset fields are ignored (and disabled in the ActionPlugin dialog). Placement is driven by via geometry plus edge/pad margins.
+- If no filled copper is available, the plugin asks whether to rebuild zone copper.
+- If user-placed vias exist on the selected zone net inside the zone, the plugin asks whether to replace them.
+- `Remove Via Array` removes plugin-owned vias for the selected zone; if user vias are detected in the same zone/net, it asks whether to remove those too.
+- `Clean Orphan Vias` removes plugin-owned vias that no longer belong inside their owning zones.
+- In the ActionPlugin dialog, options (including `Reset Prompt Choices` and `Clean Orphan Vias`) are in the left-side options panel; bottom-row actions are `Cancel`, `Remove Via Array`, and `OK`.
 
-The net is now derived from the selected zone and is read-only in the dialog.
-The plugin dialog lets you specify via size/drill plus two separate margin controls:
-- Edge margin: extra distance from via edge to zone boundary.
-- Pad margin: extra spacing used by overlap checks against tracks/pads/vias/zones.
-You can also customize vertical/horizontal spacing and offsets.
-All controls now include tooltips explaining what they do.
-The plugin now also includes a toggle (`Check overlaps on all copper layers`) so you can decide whether overlap checks are global (all copper layers) or limited to the selected zone layer.
-The most recent settings are remembered and restored when reopening the dialog, including via size/drill, spacing, offsets, edge margin, pad margin, randomize, clear mode, and the overlap-scope toggle.
-For safety, plugin-managed vias are tracked per zone by UUID in the PCB file. Remove/update operations only touch vias in that ownership list, so user-placed vias are not modified even if they look identical or are copied from plugin-created geometry.
-The `Remove Via Array` button removes only plugin-owned vias and keeps the selected zone/pour.
-When you're satisfied with your settings you have just to press __Ok__ and the fillup will begin (I'm assuming __Fill__ action is checked).
-If everything goes fine you'll get something like this:
-
-![viastitching result](pictures/viastitching_result.png?raw=true "ViaStitching result")
-
-After stitching is always a good practice to perform a DRC.
-
-As you can see some implanted vias may still overlap with some other PCB elements (tracks, ~~zone, pads, vias~~ etc) at this development stage the removal of conflicting vias is up to the user with future releases the implant process will prevent vias to overlap with other elements.
-
-The default action of the dialog is the __Fill__ action (as you can notice from the radio-button on the bottom) but this plugin is not limited to this function only. __Clear__ action works the in the opposite way: it removes from selected area any vias matching settings (i.e. same net, same size, same drill specified in dialog fields). Beware: __Clear__ will not distinguish vias implanted by __Fill__ from user ones until you check the specific checkbox, and will remove all of them if they match the values entered. If you check __clear only plugin placed vias__ widget the plugin will inspect vias grouped on a specific group and remove only those matching: this can be used as an __Undo__ feature.
+Ownership and settings are persisted in PCB metadata, so commit/revert in git keeps via-array state coherent with the board revision.
 
 ## TODO
 
@@ -74,10 +67,10 @@ Some features still to code:
    - [x] vias.
 - [ ] Different fillup patterns/modes (bounding box, centered spiral).
 - [x] Avoid placing vias near area edges (define clearance).
-- [ ] History management (board commit).
+- [x] History management (board commit).
 - [ ] Localization.
 - [x] Support for multiple zones
-- [x] Storage of stitching configuration for each individual zone as JSON string in a user layer.
+- [x] Storage of stitching configuration for each individual zone in PCB metadata.
 - [ ] Any request?
 
 ## Coding notes

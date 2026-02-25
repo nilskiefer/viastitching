@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
 import sys
 import traceback
 from datetime import datetime
@@ -43,6 +44,10 @@ DEFAULT_ZONE_SETTINGS: Dict[str, Any] = {
     "CenterSegments": True,
     "MaximizeVias": False,
 }
+
+
+class OperationCanceled(Exception):
+    pass
 
 
 def mm_to_nm(mm: float) -> int:
@@ -322,6 +327,8 @@ def _is_zone(item: Any) -> bool:
 
 
 def _select_single_zone(board: Any) -> Zone:
+    if not hasattr(board, "get_selection"):
+        raise RuntimeError("KiCad IPC board API is unavailable (missing get_selection).")
     selection = list(board.get_selection())
     zones = [item for item in selection if _is_zone(item)]
     if not zones:
@@ -341,10 +348,22 @@ def _zone_net_name(zone: Zone) -> str:
     return str(getattr(net, "name", "") or "")
 
 
-def _ensure_zone_filled(board: Any, zone: Zone) -> List[Any]:
+def _ensure_zone_filled(board: Any, zone: Zone, allow_refill_prompt: bool = True) -> List[Any]:
     polygons = _zone_polygons(zone)
     if polygons:
         return polygons
+    if allow_refill_prompt:
+        should_refill = _prompt_yes_no(
+            "ViaStitching",
+            "Selected zone has no filled copper.\n\nRebuild copper for this zone now?",
+            default_no=False,
+        )
+        if not should_refill:
+            raise OperationCanceled("Selected zone is not filled. Operation canceled by user.")
+    if not hasattr(board, "refill_zones"):
+        raise RuntimeError(
+            "Selected zone is not filled, and this KiCad IPC board object cannot refill zones."
+        )
     board.refill_zones()
     polygons = _zone_polygons(zone)
     if polygons:
@@ -840,6 +859,35 @@ def _via_inside_zone(via: Any, zone_polygons: Sequence[Any]) -> bool:
     return _point_inside_zone_with_margin(x, y, zone_polygons, 0)
 
 
+def _via_net_name(via: Any) -> str:
+    net = getattr(via, "net", None)
+    if net is None:
+        return ""
+    return str(getattr(net, "name", "") or "")
+
+
+def _vias_on_zone_net_inside(
+    board: Any,
+    zone: Zone,
+    polygons: Sequence[Any],
+    exclude_ids: Optional[set[str]] = None,
+) -> List[Any]:
+    zone_net = _zone_net_name(zone)
+    if not zone_net:
+        return []
+    exclude_ids = exclude_ids or set()
+    vias: List[Any] = []
+    for via in board.get_vias():
+        via_id = _item_id(via)
+        if via_id and via_id in exclude_ids:
+            continue
+        if _via_net_name(via) != zone_net:
+            continue
+        if _via_inside_zone(via, polygons):
+            vias.append(via)
+    return vias
+
+
 class Runtime:
     def __init__(self, kicad: KiCad) -> None:
         self.kicad = kicad
@@ -859,17 +907,194 @@ class Runtime:
             f.write(f"[{ts}] {message}\n")
 
 
-def _show_message(title: str, message: str, error: bool = False) -> None:
-    # IPC API does not expose a dedicated message-box helper, but wx is available
-    # in typical KiCad Python environments. Fall back to stdout/stderr if not.
+def _require_board_api(board: Any) -> None:
+    required = [
+        "begin_commit",
+        "push_commit",
+        "drop_commit",
+        "get_selection",
+        "get_zones",
+        "get_vias",
+        "get_tracks",
+        "get_pads",
+        "create_items",
+        "remove_items",
+        "update_items",
+    ]
+    missing = [name for name in required if not hasattr(board, name)]
+    if missing:
+        missing_str = ", ".join(missing)
+        raise RuntimeError(
+            "KiCad IPC board API is incomplete for ViaStitching. "
+            f"Missing methods: {missing_str}. "
+            "Enable KiCad API in Preferences -> Plugins and run ViaStitching via plugin.json actions."
+        )
+
+
+def _open_log_folder(path: str) -> bool:
+    folder = os.path.dirname(path)
+    if not folder:
+        return False
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", folder])
+            return True
+        if os.name == "nt":
+            os.startfile(folder)
+            return True
+        subprocess.Popen(["xdg-open", folder])
+        return True
+    except Exception:
+        return False
+
+
+def _show_error_with_log(title: str, message: str, log_path: str) -> None:
+    prompt = f"{message}\n\nLog file:\n{log_path}\n\nOpen log folder?"
     try:
         import wx  # type: ignore
 
-        style = wx.OK | (wx.ICON_ERROR if error else wx.ICON_INFORMATION)
-        wx.MessageBox(message, title, style)
+        dlg = wx.MessageDialog(None, prompt, title, wx.YES_NO | wx.NO_DEFAULT | wx.ICON_ERROR)
+        if hasattr(dlg, "SetYesNoLabels"):
+            dlg.SetYesNoLabels("Open Log Folder", "Close")
+        result = dlg.ShowModal()
+        dlg.Destroy()
+        if result == wx.ID_YES:
+            _open_log_folder(log_path)
+        return
     except Exception:
-        stream = sys.stderr if error else sys.stdout
-        print(f"{title}: {message}", file=stream)
+        pass
+    print(f"{title}: {prompt}", file=sys.stderr)
+
+
+def _prompt_yes_no(title: str, message: str, default_no: bool = True) -> bool:
+    try:
+        import wx  # type: ignore
+
+        style = wx.YES_NO | wx.ICON_QUESTION
+        if default_no:
+            style |= wx.NO_DEFAULT
+        return wx.MessageBox(message, title, style) == wx.YES
+    except Exception:
+        return not default_no
+
+
+def _format_mm(value: Any, fallback: float) -> str:
+    v = _safe_float(value, fallback)
+    text = f"{v:.6f}".rstrip("0").rstrip(".")
+    return text if text else "0"
+
+
+def _prompt_zone_settings(
+    zone: Zone,
+    settings: Dict[str, Any],
+    force_maximize: Optional[bool],
+    force_center_segments: Optional[bool],
+) -> Dict[str, Any]:
+    try:
+        import wx  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"Unable to open settings dialog (wx unavailable): {exc}")
+
+    dlg = wx.Dialog(None, title=f"{PLUGIN_NAME}: Zone Settings", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+    root = wx.BoxSizer(wx.VERTICAL)
+
+    zone_name = _zone_name(zone) or "(unnamed zone)"
+    zone_net = _zone_net_name(zone) or "(no net)"
+    hdr = wx.StaticText(dlg, label=f"Zone: {zone_name}")
+    net = wx.TextCtrl(dlg, value=zone_net, style=wx.TE_READONLY)
+    hdr.SetToolTip("Currently selected zone name.")
+    net.SetToolTip("Net is derived from selected zone and cannot be edited.")
+    root.Add(hdr, 0, wx.ALL | wx.EXPAND, 8)
+    root.Add(net, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
+
+    grid = wx.FlexGridSizer(0, 2, 6, 8)
+    grid.AddGrowableCol(1, 1)
+    fields = [
+        ("Via size (mm)", "ViaSize", "Via outer diameter."),
+        ("Via drill (mm)", "ViaDrill", "Via drill diameter. Must be smaller than via size."),
+        ("Horizontal spacing (mm)", "HSpacing", "Horizontal center-to-center spacing."),
+        ("Vertical spacing (mm)", "VSpacing", "Vertical center-to-center spacing."),
+        ("Horizontal offset (mm)", "HOffset", "Horizontal grid offset."),
+        ("Vertical offset (mm)", "VOffset", "Vertical grid offset."),
+        ("Edge margin (mm)", "EdgeMargin", "Extra distance from via edge to zone boundary."),
+        ("Pad margin (mm)", "PadMargin", "Extra spacing used against pads/tracks/vias."),
+    ]
+    controls: Dict[str, Any] = {}
+    for label, key, tip in fields:
+        txt_label = wx.StaticText(dlg, label=label)
+        txt_value = wx.TextCtrl(dlg, value=_format_mm(settings.get(key), DEFAULT_ZONE_SETTINGS[key]))
+        txt_label.SetToolTip(tip)
+        txt_value.SetToolTip(tip)
+        grid.Add(txt_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(txt_value, 1, wx.EXPAND)
+        controls[key] = txt_value
+    root.Add(grid, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
+
+    chk_include_layers = wx.CheckBox(dlg, label="Check overlaps on all copper layers")
+    chk_include_layers.SetValue(_to_bool(settings.get("IncludeOtherLayers"), True))
+    chk_include_layers.SetToolTip("Disable to only check overlaps on the selected zone layer(s).")
+    root.Add(chk_include_layers, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+    chk_center_segments = wx.CheckBox(dlg, label="Center local segments")
+    chk_center_segments.SetValue(_to_bool(settings.get("CenterSegments"), True))
+    chk_center_segments.SetToolTip("Center vias within each reachable row segment.")
+    if force_center_segments is not None:
+        chk_center_segments.SetValue(bool(force_center_segments))
+        chk_center_segments.Enable(False)
+    root.Add(chk_center_segments, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+    chk_maximize = wx.CheckBox(dlg, label="Try to maximize vias")
+    chk_maximize.SetValue(_to_bool(settings.get("MaximizeVias"), False))
+    chk_maximize.SetToolTip("Search multiple grid phases to maximize via count while respecting margins.")
+    if force_maximize is not None:
+        chk_maximize.SetValue(bool(force_maximize))
+        chk_maximize.Enable(False)
+    root.Add(chk_maximize, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+    buttons = wx.StdDialogButtonSizer()
+    btn_cancel = wx.Button(dlg, wx.ID_CANCEL, "Cancel")
+    btn_ok = wx.Button(dlg, wx.ID_OK, "OK")
+    buttons.AddButton(btn_cancel)
+    buttons.AddButton(btn_ok)
+    buttons.Realize()
+    root.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
+
+    dlg.SetSizer(root)
+    dlg.SetMinSize((560, 0))
+    dlg.Fit()
+    dlg.CentreOnScreen()
+
+    while True:
+        result = dlg.ShowModal()
+        if result != wx.ID_OK:
+            dlg.Destroy()
+            raise OperationCanceled("Operation canceled by user.")
+
+        parsed: Dict[str, Any] = dict(DEFAULT_ZONE_SETTINGS)
+        bad_value = False
+        for _, key, _ in fields:
+            text = controls[key].GetValue()
+            try:
+                parsed[key] = float(text)
+            except Exception:
+                bad_value = True
+                break
+        if bad_value:
+            wx.MessageBox("Enter valid numeric values for all dimensions.", PLUGIN_NAME, wx.OK | wx.ICON_ERROR)
+            continue
+
+        parsed["IncludeOtherLayers"] = bool(chk_include_layers.GetValue())
+        parsed["CenterSegments"] = bool(chk_center_segments.GetValue())
+        parsed["MaximizeVias"] = bool(chk_maximize.GetValue())
+
+        try:
+            _validate_settings(parsed)
+        except Exception as exc:
+            wx.MessageBox(str(exc), PLUGIN_NAME, wx.OK | wx.ICON_ERROR)
+            continue
+
+        dlg.Destroy()
+        return parsed
 
 
 def _update_zone_array(
@@ -879,7 +1104,7 @@ def _update_zone_array(
     force_maximize: Optional[bool] = None,
     force_center_segments: Optional[bool] = None,
 ) -> Dict[str, int]:
-    polygons = _ensure_zone_filled(board, zone)
+    polygons = _ensure_zone_filled(board, zone, allow_refill_prompt=True)
     metadata_item, metadata, old_meta_text = _find_metadata(board)
     legacy_blob = _find_legacy_config_blob(board)
 
@@ -894,25 +1119,49 @@ def _update_zone_array(
         zones[zone_id] = zone_entry
 
     settings = _load_settings_for_zone(zone, zone_entry, legacy_blob)
+    settings = _prompt_zone_settings(
+        zone=zone,
+        settings=settings,
+        force_maximize=force_maximize,
+        force_center_segments=force_center_segments,
+    )
     dims = _validate_settings(settings)
     include_other_layers = _to_bool(settings.get("IncludeOtherLayers"), True)
     center_segments = _to_bool(settings.get("CenterSegments"), True)
     maximize_vias = _to_bool(settings.get("MaximizeVias"), False)
     if force_center_segments is not None:
         center_segments = bool(force_center_segments)
+        settings["CenterSegments"] = center_segments
     if force_maximize is not None:
         maximize_vias = bool(force_maximize)
+        settings["MaximizeVias"] = maximize_vias
 
     owned_ids = [str(v) for v in (zone_entry.get("owned_via_ids") or []) if str(v)]
     via_by_id = _index_by_id(board.get_vias())
     owned_vias = [via_by_id[vid] for vid in owned_ids if vid in via_by_id]
+    owned_id_set = set(owned_ids)
+
+    user_vias = _vias_on_zone_net_inside(board, zone, polygons, exclude_ids=owned_id_set)
+    user_via_ids = {_item_id(via) for via in user_vias if _item_id(via)}
+    replace_user_vias = False
+    if user_vias:
+        replace_user_vias = _prompt_yes_no(
+            PLUGIN_NAME,
+            "User-placed vias were detected on the selected zone net inside this zone.\n\n"
+            "Replace those vias with plugin vias?",
+            default_no=True,
+        )
+
+    ignore_ids = set(owned_id_set)
+    if replace_user_vias:
+        ignore_ids |= user_via_ids
 
     new_vias, stats = _build_candidates(
         board=board,
         zone=zone,
         polygons=polygons,
         dims=dims,
-        ignore_owned_ids=set(owned_ids),
+        ignore_owned_ids=ignore_ids,
         include_other_layers=include_other_layers,
         center_segments=center_segments,
         maximize_vias=maximize_vias,
@@ -930,8 +1179,12 @@ def _update_zone_array(
     commit = board.begin_commit()
     pushed = False
     try:
-        if owned_vias:
-            board.remove_items(owned_vias)
+        vias_to_remove = list(owned_vias)
+        if replace_user_vias and user_vias:
+            vias_to_remove.extend(user_vias)
+        if vias_to_remove:
+            vias_to_remove = list(_index_by_id(vias_to_remove).values())
+            board.remove_items(vias_to_remove)
 
         created_vias = list(board.create_items(new_vias))
         created_ids = [_item_id(via) for via in created_vias if _item_id(via)]
@@ -948,7 +1201,7 @@ def _update_zone_array(
             zone_for_new_item=zone,
         )
 
-        if owned_vias or created_vias or meta_changed:
+        if vias_to_remove or created_vias or meta_changed:
             board.push_commit(commit, "ViaStitching: Update Array")
             pushed = True
         else:
@@ -956,6 +1209,7 @@ def _update_zone_array(
 
         return {
             "removed_old": len(owned_vias),
+            "removed_user": len(user_vias) if replace_user_vias else 0,
             "placed": len(created_vias),
             "candidates_tested": stats["candidates_tested"],
             "inside": stats["inside"],
@@ -980,15 +1234,33 @@ def _remove_zone_array(runtime: Runtime, board: Any, zone: Zone) -> Dict[str, in
     owned_ids = [str(v) for v in (zone_entry.get("owned_via_ids") or []) if str(v)]
     via_by_id = _index_by_id(board.get_vias())
     owned_vias = [via_by_id[vid] for vid in owned_ids if vid in via_by_id]
+    owned_id_set = set(owned_ids)
 
     if not owned_vias and not owned_ids:
         return {"removed": 0}
 
+    polygons = _zone_polygons(zone)
+    remove_user_vias = False
+    user_vias: List[Any] = []
+    if polygons:
+        user_vias = _vias_on_zone_net_inside(board, zone, polygons, exclude_ids=owned_id_set)
+        if user_vias:
+            remove_user_vias = _prompt_yes_no(
+                PLUGIN_NAME,
+                "User-placed vias were detected on the selected zone net inside this zone.\n\n"
+                "Remove those user vias too?",
+                default_no=True,
+            )
+
     commit = board.begin_commit()
     pushed = False
     try:
-        if owned_vias:
-            board.remove_items(owned_vias)
+        vias_to_remove = list(owned_vias)
+        if remove_user_vias and user_vias:
+            vias_to_remove.extend(user_vias)
+        vias_to_remove = list(_index_by_id(vias_to_remove).values())
+        if vias_to_remove:
+            board.remove_items(vias_to_remove)
 
         zone_entry["owned_via_ids"] = []
         zone_entry["zone_name"] = _zone_name(zone)
@@ -1001,13 +1273,16 @@ def _remove_zone_array(runtime: Runtime, board: Any, zone: Zone) -> Dict[str, in
             zone_for_new_item=zone,
         )
 
-        if owned_vias or meta_changed:
+        if vias_to_remove or meta_changed:
             board.push_commit(commit, "ViaStitching: Remove Array")
             pushed = True
         else:
             board.drop_commit(commit)
 
-        return {"removed": len(owned_vias)}
+        return {
+            "removed": len(owned_vias),
+            "removed_user": len(user_vias) if remove_user_vias else 0,
+        }
     except Exception:
         if not pushed:
             board.drop_commit(commit)
@@ -1092,17 +1367,16 @@ def run_mode(mode: str) -> int:
 
         board = kicad.get_board()
         if board is None:
-            _show_message(PLUGIN_NAME, "No active PCB board.", error=True)
+            _show_error_with_log(PLUGIN_NAME, "No active PCB board.", runtime.log_path)
             return 1
 
         try:
+            _require_board_api(board)
+            runtime.log(
+                f"board api ok type={type(board).__name__} python={sys.version.split()[0]}"
+            )
             if mode == "clean-orphans":
                 result = _clean_orphans(runtime, board)
-                msg = (
-                    f"Removed orphan vias: {result['removed']}\n"
-                    f"Cleaned stale ownership IDs: {result['cleaned_ids']}"
-                )
-                _show_message(PLUGIN_NAME, msg, error=False)
                 runtime.log(f"clean-orphans done: {result}")
                 return 0
 
@@ -1113,32 +1387,21 @@ def run_mode(mode: str) -> int:
 
             if mode == "remove":
                 result = _remove_zone_array(runtime, board, zone)
-                _show_message(PLUGIN_NAME, f"Removed {result['removed']} plugin vias.")
                 runtime.log(f"remove done: {result}")
                 return 0
 
             force_maximize = True if mode == "update-maximize" else None
             result = _update_zone_array(runtime, board, zone, force_maximize=force_maximize)
-            msg = (
-                f"Placed {result['placed']} vias.\n"
-                f"Removed old plugin vias: {result['removed_old']}\n\n"
-                f"Candidate points tested: {result['candidates_tested']}\n"
-                f"Points inside selected zone copper: {result['inside']}\n"
-                f"Rejected by overlap/pad-margin checks: {result['rejected_overlap']}\n"
-                f"Rejected by edge margin checks: {result['rejected_edge']}"
-            )
-            _show_message(PLUGIN_NAME, msg)
             runtime.log(f"update done: {result}")
             return 0
 
+        except OperationCanceled as exc:
+            runtime.log(f"CANCELED: {exc}")
+            return 0
         except Exception as exc:
             runtime.log(f"ERROR: {exc}")
             runtime.log(traceback.format_exc())
-            _show_message(
-                PLUGIN_NAME,
-                f"{exc}\n\nDebug log:\n{runtime.log_path}",
-                error=True,
-            )
+            _show_error_with_log(PLUGIN_NAME, str(exc), runtime.log_path)
             return 1
 
 

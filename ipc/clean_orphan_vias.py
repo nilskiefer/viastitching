@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-from viastitching_ipc import run_mode
+from _entrypoint import run
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_mode("clean-orphans"))
+    raise SystemExit(run("clean-orphans"))

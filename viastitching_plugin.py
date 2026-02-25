@@ -5,13 +5,12 @@
 # (c) Michele Santucci 2019
 #
 
-import wx
 import os
-import pcbnew
 import gettext
 
-from pcbnew import ActionPlugin, GetBoard
-from .viastitching_dialog import InitViaStitchingDialog
+import wx
+import pcbnew
+from pcbnew import ActionPlugin
 
 _ = gettext.gettext
 
@@ -19,9 +18,17 @@ class ViaStitchingPlugin(ActionPlugin):
     def defaults(self):
         self.name = _(u"ViaStitching")
         self.category = _(u"Modify PCB")
-        self.description = _(u"Create a vias stitching pattern")
+        self.description = _(u"Fill selected copper zone with stitching vias.")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__), 'viastitching.png')
 
     def Run(self):
-        InitViaStitchingDialog(None)
+        try:
+            from .viastitching_dialog import InitViaStitchingDialog
+            InitViaStitchingDialog(pcbnew.GetBoard())
+        except Exception as exc:
+            wx.MessageBox(
+                _(u"Failed to open ViaStitching dialog:\n%s") % str(exc),
+                _(u"ViaStitching"),
+                wx.OK | wx.ICON_ERROR,
+            )

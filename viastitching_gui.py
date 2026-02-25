@@ -66,7 +66,7 @@ class viastitching_gui ( wx.Dialog ):
 
 		bHSizer3 = wx.BoxSizer( wx.HORIZONTAL )
 
-		self.m_lblSpacing = wx.StaticText( self, wx.ID_ANY, _(u"Spacing (V/H)"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblSpacing = wx.StaticText( self, wx.ID_ANY, _(u"Spacing c-c (V/H)"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_lblSpacing.Wrap( -1 )
 
 		bHSizer3.Add( self.m_lblSpacing, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
@@ -144,39 +144,118 @@ class viastitching_gui ( wx.Dialog ):
 
 		bMainSizer.Add( bSizer8, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL|wx.EXPAND, 5 )
 
-		bHSizer4 = wx.BoxSizer( wx.HORIZONTAL )
+		bOptionsRow = wx.BoxSizer( wx.HORIZONTAL )
+
+		bLeftOptions = wx.BoxSizer( wx.VERTICAL )
 
 		self.m_chkClearOwn = wx.CheckBox( self, wx.ID_ANY, _(u"Clear only plugin placed vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_chkClearOwn.SetValue(True)
-		bHSizer4.Add( self.m_chkClearOwn, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+		bLeftOptions.Add( self.m_chkClearOwn, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		self.m_chkMaximizeVias = wx.CheckBox( self, wx.ID_ANY, _(u"Try to maximize vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkMaximizeVias.SetValue(False)
+		bLeftOptions.Add( self.m_chkMaximizeVias, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		bMaxMinSpacingSizer = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.m_chkMaximizeMinDistance = wx.CheckBox( self, wx.ID_ANY, _(u"Maximize min c-c"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkMaximizeMinDistance.SetValue(False)
+		bMaxMinSpacingSizer.Add( self.m_chkMaximizeMinDistance, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 6 )
+
+		self.m_txtMaximizeMinDistance = wx.TextCtrl( self, wx.ID_ANY, _(u"0"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_txtMaximizeMinDistance.SetMinSize( wx.Size( 72,-1 ) )
+		bMaxMinSpacingSizer.Add( self.m_txtMaximizeMinDistance, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 4 )
+
+		self.m_lblUnitMaximizeMinDistance = wx.StaticText( self, wx.ID_ANY, _(u"mm"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblUnitMaximizeMinDistance.Wrap( -1 )
+		bMaxMinSpacingSizer.Add( self.m_lblUnitMaximizeMinDistance, 0, wx.ALIGN_CENTER_VERTICAL, 0 )
+
+		bLeftOptions.Add( bMaxMinSpacingSizer, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		bTargetSizer = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.m_chkTargetViaCount = wx.CheckBox( self, wx.ID_ANY, _(u"Place target vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkTargetViaCount.SetValue(False)
+		bTargetSizer.Add( self.m_chkTargetViaCount, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 6 )
+
+		self.m_txtTargetViaCount = wx.TextCtrl( self, wx.ID_ANY, _(u"100"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_txtTargetViaCount.SetMinSize( wx.Size( 72,-1 ) )
+		bTargetSizer.Add( self.m_txtTargetViaCount, 0, wx.ALIGN_CENTER_VERTICAL, 0 )
+
+		bLeftOptions.Add( bTargetSizer, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		bTargetPatternSizer = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.m_lblTargetPattern = wx.StaticText( self, wx.ID_ANY, _(u"Target pattern"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblTargetPattern.Wrap( -1 )
+
+		bTargetPatternSizer.Add( self.m_lblTargetPattern, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 6 )
+
+		m_choiceTargetPatternChoices = [ _(u"Grid"), _(u"45-degree offset"), _(u"Spiral") ]
+		self.m_choiceTargetPattern = wx.Choice( self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, m_choiceTargetPatternChoices, 0 )
+		self.m_choiceTargetPattern.SetSelection( 0 )
+		bTargetPatternSizer.Add( self.m_choiceTargetPattern, 0, wx.ALIGN_CENTER_VERTICAL, 0 )
+
+		bLeftOptions.Add( bTargetPatternSizer, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		self.m_chkCenterSegments = wx.CheckBox( self, wx.ID_ANY, _(u"Center local segments"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkCenterSegments.SetValue(True)
+		bLeftOptions.Add( self.m_chkCenterSegments, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		self.m_chkIncludeOtherLayers = wx.CheckBox( self, wx.ID_ANY, _(u"Check overlaps on all copper layers (safer, slower)"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkIncludeOtherLayers.SetValue(True)
+		bLeftOptions.Add( self.m_chkIncludeOtherLayers, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		self.m_chkAvoidFootprintZones = wx.CheckBox( self, wx.ID_ANY, _(u"Block footprint copper/keepouts"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkAvoidFootprintZones.SetValue(True)
+		bLeftOptions.Add( self.m_chkAvoidFootprintZones, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
+
+		self.m_chkAllowSameNetUnderPad = wx.CheckBox( self, wx.ID_ANY, _(u"Allow same-net under-pad placement"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_chkAllowSameNetUnderPad.SetValue(False)
+		bLeftOptions.Add( self.m_chkAllowSameNetUnderPad, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
 		self.m_chkRandomize = wx.CheckBox( self, wx.ID_ANY, _(u"Randomize"), wx.DefaultPosition, wx.DefaultSize, 0 )
-		bHSizer4.Add( self.m_chkRandomize, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
-
-		self.m_chkIncludeOtherLayers = wx.CheckBox( self, wx.ID_ANY, _(u"Check overlaps on all copper layers"), wx.DefaultPosition, wx.DefaultSize, 0 )
-		self.m_chkIncludeOtherLayers.SetValue(True)
-		bHSizer4.Add( self.m_chkIncludeOtherLayers, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+		bLeftOptions.Add( self.m_chkRandomize, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
 		self.m_chkDebugLogging = wx.CheckBox( self, wx.ID_ANY, _(u"Enable logging"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.m_chkDebugLogging.SetValue(True)
-		bHSizer4.Add( self.m_chkDebugLogging, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+		bLeftOptions.Add( self.m_chkDebugLogging, 0, wx.ALIGN_LEFT|wx.ALL, 2 )
 
+		self.m_btnCleanOrphans = wx.Button( self, wx.ID_ANY, _(u"Clean &Orphan Vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		bLeftOptions.Add( self.m_btnCleanOrphans, 0, wx.ALIGN_LEFT|wx.TOP|wx.BOTTOM, 8 )
 
-		bMainSizer.Add( bHSizer4, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL, 5 )
+		self.m_btnResetPrompts = wx.Button( self, wx.ID_ANY, _(u"Reset Prompt &Choices"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		bLeftOptions.Add( self.m_btnResetPrompts, 0, wx.ALIGN_LEFT|wx.BOTTOM, 2 )
+
+		bOptionsRow.Add( bLeftOptions, 0, wx.ALL|wx.EXPAND, 5 )
+
+		bRightPreview = wx.BoxSizer( wx.VERTICAL )
+
+		self.m_lblPreview = wx.StaticText( self, wx.ID_ANY, _(u"Placement Preview"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblPreview.Wrap( -1 )
+
+		bRightPreview.Add( self.m_lblPreview, 0, wx.ALL, 2 )
+
+		self.m_previewPanel = wx.Panel( self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SIMPLE|wx.TAB_TRAVERSAL )
+		self.m_previewPanel.SetMinSize( wx.Size( 420,260 ) )
+		bRightPreview.Add( self.m_previewPanel, 1, wx.EXPAND|wx.ALL, 2 )
+
+		self.m_lblPreviewLegend = wx.StaticText( self, wx.ID_ANY, _(u"Green: accepted  Orange: overlap reject  Red: edge reject"), wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.m_lblPreviewLegend.Wrap( -1 )
+
+		bRightPreview.Add( self.m_lblPreviewLegend, 0, wx.ALL, 2 )
+
+		bOptionsRow.Add( bRightPreview, 1, wx.EXPAND|wx.LEFT, 8 )
+
+		bMainSizer.Add( bOptionsRow, 0, wx.EXPAND, 5 )
 
 		bHSizer5 = wx.BoxSizer( wx.HORIZONTAL )
 
 		self.m_btnCancel = wx.Button( self, wx.ID_ANY, _(u"&Cancel"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		bHSizer5.Add( self.m_btnCancel, 0, wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
 
-		self.m_btnResetPrompts = wx.Button( self, wx.ID_ANY, _(u"Reset Prompt &Choices"), wx.DefaultPosition, wx.DefaultSize, 0 )
-		bHSizer5.Add( self.m_btnResetPrompts, 0, wx.ALL, 5 )
-
 		self.m_btnClear = wx.Button( self, wx.ID_ANY, _(u"Remove &Via Array"), wx.DefaultPosition, wx.DefaultSize, 0 )
 		bHSizer5.Add( self.m_btnClear, 0, wx.ALL, 5 )
-
-		self.m_btnCleanOrphans = wx.Button( self, wx.ID_ANY, _(u"Clean &Orphan Vias"), wx.DefaultPosition, wx.DefaultSize, 0 )
-		bHSizer5.Add( self.m_btnCleanOrphans, 0, wx.ALL, 5 )
 
 		self.m_btnOk = wx.Button( self, wx.ID_ANY, _(u"&Ok"), wx.DefaultPosition, wx.DefaultSize, 0 )
 
@@ -184,7 +263,7 @@ class viastitching_gui ( wx.Dialog ):
 		bHSizer5.Add( self.m_btnOk, 0, wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
 
 
-		bMainSizer.Add( bHSizer5, 1, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL, 5 )
+		bMainSizer.Add( bHSizer5, 0, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_CENTER_VERTICAL, 5 )
 
 
 		self.SetSizer( bMainSizer )
